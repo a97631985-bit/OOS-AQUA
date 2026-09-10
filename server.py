@@ -1,15 +1,57 @@
 import sqlite3
 import os
+import shutil
+import json
+import threading
 from flask import Flask, render_template, request, jsonify, send_from_directory, make_response
 from datetime import datetime, date
 
 app = Flask(__name__)
 DB_FILE = 'water_supplier.db'
+BACKUP_DIR = 'backups'
+
+# Ensure backup directory exists
+os.makedirs(BACKUP_DIR, exist_ok=True)
 
 def get_db():
     conn = sqlite3.connect(DB_FILE)
     conn.row_factory = sqlite3.Row
+    conn.execute("PRAGMA journal_mode=WAL")       # Crash protection - data won't corrupt
+    conn.execute("PRAGMA foreign_keys=ON")         # Data integrity enforcement
+    conn.execute("PRAGMA synchronous=FULL")        # Maximum durability - every write is flushed to disk
     return conn
+
+def backup_database(reason="manual"):
+    """Create a timestamped backup of the database"""
+    if not os.path.exists(DB_FILE):
+        return None
+    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+    backup_name = f"backup_{reason}_{timestamp}.db"
+    backup_path = os.path.join(BACKUP_DIR, backup_name)
+    
+    # Use SQLite's built-in backup API for safe hot backup
+    src = sqlite3.connect(DB_FILE)
+    dst = sqlite3.connect(backup_path)
+    src.backup(dst)
+    dst.close()
+    src.close()
+    
+    # Keep only last 30 backups to save space
+    backups = sorted([f for f in os.listdir(BACKUP_DIR) if f.endswith('.db')])
+    while len(backups) > 30:
+        os.remove(os.path.join(BACKUP_DIR, backups.pop(0)))
+    
+    return backup_path
+
+def auto_daily_backup():
+    """Run automatic backup every 6 hours"""
+    backup_database("auto")
+    timer = threading.Timer(6 * 3600, auto_daily_backup)
+    timer.daemon = True
+    timer.start()
+
+# Start auto backup scheduler
+auto_daily_backup()
 
 def init_db():
     conn = get_db()
@@ -42,7 +84,8 @@ def init_db():
         ('price_per_jar', 'REAL NOT NULL DEFAULT 35'),
         ('jar_security_deposit', 'REAL DEFAULT 0'),
         ('jars_holding', 'INTEGER DEFAULT 0'),
-        ('previous_dues', 'REAL DEFAULT 0')
+        ('previous_dues', 'REAL DEFAULT 0'),
+        ('is_deleted', 'INTEGER DEFAULT 0')
     ]
     for col, col_def in columns:
         try:
@@ -67,7 +110,7 @@ def serve_logo():
 def manage_customers():
     conn = get_db()
     if request.method == 'GET':
-        customers = conn.execute('SELECT * FROM customers ORDER BY name').fetchall()
+        customers = conn.execute('SELECT * FROM customers WHERE is_deleted = 0 ORDER BY name').fetchall()
         return jsonify([dict(c) for c in customers])
         
     if request.method == 'POST':
@@ -94,11 +137,13 @@ def manage_customers():
 def modify_customer(id):
     conn = get_db()
     if request.method == 'DELETE':
-        conn.execute('DELETE FROM entries WHERE customer_id = ?', (id,))
-        conn.execute('DELETE FROM customers WHERE id = ?', (id,))
+        # Create backup before any delete operation
+        backup_database("before_delete")
+        # Soft delete - data is preserved, just hidden
+        conn.execute('UPDATE customers SET is_deleted = 1 WHERE id = ?', (id,))
         conn.commit()
         conn.close()
-        return jsonify({'success': True})
+        return jsonify({'success': True, 'message': 'Customer hidden (soft-deleted). Data is preserved in backups.'})
         
     if request.method == 'PUT':
         data = request.json
@@ -188,7 +233,7 @@ def get_billing():
     conn = get_db()
     like_date = f"{year}-{month.zfill(2)}-%"
     
-    customers = conn.execute('SELECT * FROM customers').fetchall()
+    customers = conn.execute('SELECT * FROM customers WHERE is_deleted = 0').fetchall()
     
     billing_data = []
     total_revenue = 0
@@ -232,7 +277,7 @@ def get_stats():
     ystats = conn.execute('SELECT SUM(jars_delivered) as td FROM entries WHERE date = ?', (yesterday,)).fetchone()
     
     # Overall Customers stats
-    cust_stats = conn.execute('SELECT COUNT(*) as ac, SUM(jars_holding) as jc, SUM(jar_security_deposit) as sp, SUM(previous_dues) as pd FROM customers').fetchone()
+    cust_stats = conn.execute('SELECT COUNT(*) as ac, SUM(jars_holding) as jc, SUM(jar_security_deposit) as sp, SUM(previous_dues) as pd FROM customers WHERE is_deleted = 0').fetchone()
     
     conn.close()
     
@@ -568,6 +613,104 @@ def get_invoice():
     response = make_response(html)
     response.headers["Content-Type"] = "text/html"
     return response
+
+# ==========================================
+# DATA SAFETY ENDPOINTS
+# ==========================================
+
+@app.route('/api/backup', methods=['POST'])
+def create_backup():
+    """Manually trigger a database backup"""
+    path = backup_database("manual")
+    if path:
+        return jsonify({'success': True, 'backup_file': path, 'message': 'Backup created successfully!'})
+    return jsonify({'success': False, 'message': 'No database found to backup'}), 404
+
+@app.route('/api/export', methods=['GET'])
+def export_data():
+    """Export ALL data as JSON for safe keeping"""
+    conn = get_db()
+    customers = conn.execute('SELECT * FROM customers').fetchall()  # Include deleted ones too
+    entries = conn.execute('SELECT * FROM entries ORDER BY date').fetchall()
+    conn.close()
+    
+    export = {
+        'export_date': datetime.now().isoformat(),
+        'app_name': 'OOS AQUA Water Management',
+        'customers': [dict(c) for c in customers],
+        'entries': [dict(e) for e in entries]
+    }
+    
+    response = make_response(json.dumps(export, indent=2, ensure_ascii=False))
+    response.headers['Content-Type'] = 'application/json'
+    response.headers['Content-Disposition'] = f'attachment; filename=oos_aqua_backup_{datetime.now().strftime("%Y%m%d_%H%M%S")}.json'
+    return response
+
+@app.route('/api/import', methods=['POST'])
+def import_data():
+    """Import data from a JSON backup file"""
+    if 'file' not in request.files:
+        return jsonify({'success': False, 'message': 'No file uploaded'}), 400
+    
+    file = request.files['file']
+    try:
+        data = json.loads(file.read().decode('utf-8'))
+    except Exception:
+        return jsonify({'success': False, 'message': 'Invalid JSON file'}), 400
+    
+    # Backup current data before import
+    backup_database("before_import")
+    
+    conn = get_db()
+    c = conn.cursor()
+    
+    imported_customers = 0
+    imported_entries = 0
+    
+    for cust in data.get('customers', []):
+        existing = c.execute('SELECT id FROM customers WHERE id = ?', (cust['id'],)).fetchone()
+        if not existing:
+            c.execute('''INSERT INTO customers (id, name, phone, address, price_per_jar, jar_security_deposit, jars_holding, previous_dues, is_deleted)
+                         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)''',
+                      (cust['id'], cust['name'], cust['phone'], cust.get('address', ''),
+                       cust.get('price_per_jar', 35), cust.get('jar_security_deposit', 0),
+                       cust.get('jars_holding', 0), cust.get('previous_dues', 0), cust.get('is_deleted', 0)))
+            imported_customers += 1
+    
+    for entry in data.get('entries', []):
+        existing = c.execute('SELECT id FROM entries WHERE id = ?', (entry['id'],)).fetchone()
+        if not existing:
+            c.execute('''INSERT INTO entries (id, customer_id, date, jars_delivered, jars_returned)
+                         VALUES (?, ?, ?, ?, ?)''',
+                      (entry['id'], entry['customer_id'], entry['date'],
+                       entry.get('jars_delivered', 0), entry.get('jars_returned', 0)))
+            imported_entries += 1
+    
+    conn.commit()
+    conn.close()
+    
+    return jsonify({
+        'success': True,
+        'message': f'Imported {imported_customers} customers and {imported_entries} entries.',
+        'imported_customers': imported_customers,
+        'imported_entries': imported_entries
+    })
+
+@app.route('/api/backups', methods=['GET'])
+def list_backups():
+    """List all available backups"""
+    if not os.path.exists(BACKUP_DIR):
+        return jsonify([])
+    backups = []
+    for f in sorted(os.listdir(BACKUP_DIR), reverse=True):
+        if f.endswith('.db'):
+            fpath = os.path.join(BACKUP_DIR, f)
+            backups.append({
+                'filename': f,
+                'size_kb': round(os.path.getsize(fpath) / 1024, 1),
+                'created': datetime.fromtimestamp(os.path.getmtime(fpath)).isoformat()
+            })
+    return jsonify(backups)
 
 if __name__ == '__main__':
     app.run(debug=True, port=5000)
