@@ -1,0 +1,573 @@
+import sqlite3
+import os
+from flask import Flask, render_template, request, jsonify, send_from_directory, make_response
+from datetime import datetime, date
+
+app = Flask(__name__)
+DB_FILE = 'water_supplier.db'
+
+def get_db():
+    conn = sqlite3.connect(DB_FILE)
+    conn.row_factory = sqlite3.Row
+    return conn
+
+def init_db():
+    conn = get_db()
+    c = conn.cursor()
+    c.execute('''
+        CREATE TABLE IF NOT EXISTS customers (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            name TEXT NOT NULL,
+            phone TEXT NOT NULL,
+            address TEXT DEFAULT '',
+            price_per_jar REAL NOT NULL DEFAULT 35,
+            jar_security_deposit REAL DEFAULT 0,
+            jars_holding INTEGER DEFAULT 0,
+            previous_dues REAL DEFAULT 0
+        )
+    ''')
+    c.execute('''
+        CREATE TABLE IF NOT EXISTS entries (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            customer_id INTEGER REFERENCES customers(id),
+            date TEXT NOT NULL,
+            jars_delivered INTEGER DEFAULT 0,
+            jars_returned INTEGER DEFAULT 0
+        )
+    ''')
+    
+    # Try adding columns for backward compatibility if they don't exist
+    columns = [
+        ('address', 'TEXT DEFAULT ""'),
+        ('price_per_jar', 'REAL NOT NULL DEFAULT 35'),
+        ('jar_security_deposit', 'REAL DEFAULT 0'),
+        ('jars_holding', 'INTEGER DEFAULT 0'),
+        ('previous_dues', 'REAL DEFAULT 0')
+    ]
+    for col, col_def in columns:
+        try:
+            c.execute(f"ALTER TABLE customers ADD COLUMN {col} {col_def}")
+        except sqlite3.OperationalError:
+            pass # Column likely already exists
+            
+    conn.commit()
+    conn.close()
+
+init_db()
+
+@app.route('/')
+def index():
+    return render_template('index.html')
+
+@app.route('/logo.png')
+def serve_logo():
+    return send_from_directory(app.root_path, 'logo.png')
+
+@app.route('/api/customers', methods=['GET', 'POST'])
+def manage_customers():
+    conn = get_db()
+    if request.method == 'GET':
+        customers = conn.execute('SELECT * FROM customers ORDER BY name').fetchall()
+        return jsonify([dict(c) for c in customers])
+        
+    if request.method == 'POST':
+        data = request.json
+        c = conn.cursor()
+        c.execute('''
+            INSERT INTO customers (name, phone, address, price_per_jar, jar_security_deposit, jars_holding, previous_dues)
+            VALUES (?, ?, ?, ?, ?, ?, ?)
+        ''', (
+            data.get('name'), 
+            data.get('phone'), 
+            data.get('address', ''), 
+            float(data.get('price_per_jar', 35)),
+            float(data.get('jar_security_deposit', 0)),
+            int(data.get('jars_holding', 0)),
+            float(data.get('previous_dues', 0))
+        ))
+        conn.commit()
+        new_id = c.lastrowid
+        conn.close()
+        return jsonify({'success': True, 'id': new_id})
+
+@app.route('/api/customers/<int:id>', methods=['DELETE', 'PUT'])
+def modify_customer(id):
+    conn = get_db()
+    if request.method == 'DELETE':
+        conn.execute('DELETE FROM entries WHERE customer_id = ?', (id,))
+        conn.execute('DELETE FROM customers WHERE id = ?', (id,))
+        conn.commit()
+        conn.close()
+        return jsonify({'success': True})
+        
+    if request.method == 'PUT':
+        data = request.json
+        c = conn.cursor()
+        updates = []
+        params = []
+        for key in ['name', 'phone', 'address', 'price_per_jar', 'jar_security_deposit', 'jars_holding', 'previous_dues']:
+            if key in data:
+                updates.append(f"{key} = ?")
+                params.append(data[key])
+        
+        if updates:
+            params.append(id)
+            c.execute(f'UPDATE customers SET {", ".join(updates)} WHERE id = ?', params)
+            conn.commit()
+        conn.close()
+        return jsonify({'success': True})
+
+@app.route('/api/entries', methods=['GET', 'POST'])
+def manage_entries():
+    conn = get_db()
+    if request.method == 'GET':
+        date_filter = request.args.get('date')
+        customer_id = request.args.get('customer_id')
+        month = request.args.get('month')
+        year = request.args.get('year')
+        
+        query = 'SELECT e.*, c.name FROM entries e JOIN customers c ON e.customer_id = c.id WHERE 1=1'
+        params = []
+        
+        if date_filter:
+            query += ' AND e.date = ?'
+            params.append(date_filter)
+        if customer_id:
+            query += ' AND e.customer_id = ?'
+            params.append(customer_id)
+        if month and year:
+            query += ' AND e.date LIKE ?'
+            params.append(f"{year}-{month.zfill(2)}-%")
+            
+        query += ' ORDER BY e.id DESC'
+        entries = conn.execute(query, params).fetchall()
+        return jsonify([dict(e) for e in entries])
+        
+    if request.method == 'POST':
+        data = request.json
+        c = conn.cursor()
+        c.execute('''
+            INSERT INTO entries (customer_id, date, jars_delivered, jars_returned)
+            VALUES (?, ?, ?, ?)
+        ''', (
+            data.get('customer_id'),
+            data.get('date'),
+            int(data.get('jars_delivered', 0)),
+            int(data.get('jars_returned', 0))
+        ))
+        # Update jars_holding for the customer
+        net_jars = int(data.get('jars_delivered', 0)) - int(data.get('jars_returned', 0))
+        c.execute('UPDATE customers SET jars_holding = jars_holding + ? WHERE id = ?', (net_jars, data.get('customer_id')))
+        
+        conn.commit()
+        new_id = c.lastrowid
+        conn.close()
+        return jsonify({'success': True, 'id': new_id})
+
+@app.route('/api/entries/<int:id>', methods=['DELETE'])
+def delete_entry(id):
+    conn = get_db()
+    c = conn.cursor()
+    # Need to revert jars_holding
+    entry = c.execute('SELECT customer_id, jars_delivered, jars_returned FROM entries WHERE id = ?', (id,)).fetchone()
+    if entry:
+        net_jars = entry['jars_delivered'] - entry['jars_returned']
+        c.execute('UPDATE customers SET jars_holding = jars_holding - ? WHERE id = ?', (net_jars, entry['customer_id']))
+        c.execute('DELETE FROM entries WHERE id = ?', (id,))
+        conn.commit()
+    conn.close()
+    return jsonify({'success': True})
+
+@app.route('/api/billing', methods=['GET'])
+def get_billing():
+    month = request.args.get('month')
+    year = request.args.get('year')
+    if not month or not year:
+        return jsonify({'error': 'Missing month or year'}), 400
+        
+    conn = get_db()
+    like_date = f"{year}-{month.zfill(2)}-%"
+    
+    customers = conn.execute('SELECT * FROM customers').fetchall()
+    
+    billing_data = []
+    total_revenue = 0
+    pending_dues = 0
+    
+    for c in customers:
+        entries = conn.execute('SELECT SUM(jars_delivered) as td, SUM(jars_returned) as tr FROM entries WHERE customer_id = ? AND date LIKE ?', (c['id'], like_date)).fetchone()
+        
+        td = entries['td'] or 0
+        tr = entries['tr'] or 0
+        current_bill = td * c['price_per_jar']
+        total_payable = current_bill + c['previous_dues']
+        
+        billing_data.append({
+            'customer': dict(c),
+            'jars_delivered': td,
+            'jars_returned': tr,
+            'current_bill': current_bill,
+            'total_payable': total_payable
+        })
+        total_revenue += current_bill
+        pending_dues += total_payable
+        
+    conn.close()
+    return jsonify({
+        'summary': {'total_revenue': total_revenue, 'pending_dues': pending_dues},
+        'invoices': billing_data
+    })
+
+@app.route('/api/stats', methods=['GET'])
+def get_stats():
+    date_filter = request.args.get('date', date.today().isoformat())
+    conn = get_db()
+    
+    # Today stats
+    stats = conn.execute('SELECT SUM(jars_delivered) as td, SUM(jars_returned) as tr FROM entries WHERE date = ?', (date_filter,)).fetchone()
+    
+    # Yesterday stats for comparison
+    from datetime import timedelta
+    yesterday = (datetime.strptime(date_filter, "%Y-%m-%d") - timedelta(days=1)).strftime("%Y-%m-%d")
+    ystats = conn.execute('SELECT SUM(jars_delivered) as td FROM entries WHERE date = ?', (yesterday,)).fetchone()
+    
+    # Overall Customers stats
+    cust_stats = conn.execute('SELECT COUNT(*) as ac, SUM(jars_holding) as jc, SUM(jar_security_deposit) as sp, SUM(previous_dues) as pd FROM customers').fetchone()
+    
+    conn.close()
+    
+    td = stats['td'] or 0
+    tr = stats['tr'] or 0
+    ytd = ystats['td'] or 0
+    
+    return jsonify({
+        'today_delivered': td,
+        'today_returned': tr,
+        'yesterday_delivered': ytd,
+        'active_accounts': cust_stats['ac'] or 0,
+        'jars_circulating': cust_stats['jc'] or 0,
+        'security_pool': cust_stats['sp'] or 0,
+        'total_dues': cust_stats['pd'] or 0
+    })
+
+@app.route('/api/billing/invoice', methods=['GET'])
+def get_invoice():
+    customer_id = request.args.get('customer_id')
+    month = request.args.get('month')
+    year = request.args.get('year')
+    
+    if not all([customer_id, month, year]):
+        return "Missing parameters", 400
+        
+    conn = get_db()
+    c = conn.execute('SELECT * FROM customers WHERE id = ?', (customer_id,)).fetchone()
+    if not c:
+        return "Customer not found", 404
+        
+    like_date = f"{year}-{month.zfill(2)}-%"
+    entries = conn.execute('SELECT * FROM entries WHERE customer_id = ? AND date LIKE ? ORDER BY date', (customer_id, like_date)).fetchall()
+    
+    td = sum(e['jars_delivered'] for e in entries)
+    tr = sum(e['jars_returned'] for e in entries)
+    pending = td - tr
+    current_bill = td * c['price_per_jar']
+    total_payable = current_bill + c['previous_dues']
+    security_deposit = c['jar_security_deposit']
+    
+    month_name = datetime.strptime(f"{year}-{month.zfill(2)}-01", "%Y-%m-%d").strftime("%B")
+    bill_number = f"OA-{year}/{c['id']:03d}"
+    
+    # Build table rows
+    table_rows = ""
+    for idx, e in enumerate(entries, 1):
+        d = e['jars_delivered']
+        r = e['jars_returned']
+        status_html = (
+            '<span class="px-2 py-0.5 rounded-full text-[10px] font-semibold bg-emerald-100 text-emerald-700">Verified</span>'
+            if r > 0
+            else '<span class="px-2 py-0.5 rounded-full text-[10px] font-semibold bg-blue-100 text-blue-700">Delivered</span>'
+        )
+        r_display = str(r) if r > 0 else "–"
+        table_rows += f'''
+            <tr class="hover:bg-slate-50/60">
+              <td class="py-2 px-3 text-slate-400 font-mono text-[11px]">{idx:02d}</td>
+              <td class="py-2 px-3 font-semibold text-slate-800">{e['date']}</td>
+              <td class="py-2 px-3 text-slate-600">Standard Delivery</td>
+              <td class="py-2 px-3 text-center font-bold text-slate-900 bg-cyan-50/20">{d}</td>
+              <td class="py-2 px-3 text-center font-semibold text-slate-700 bg-sky-50/20">{r_display}</td>
+              <td class="py-2 px-3 text-center">{status_html}</td>
+            </tr>
+        '''
+    
+    if not entries:
+        table_rows = '<tr><td colspan="6" class="py-6 text-center text-slate-400 italic">No deliveries recorded this month.</td></tr>'
+
+    security_display = '<span class="font-semibold text-emerald-700 mono">Adjusted</span>' if security_deposit > 0 else '<span class="font-semibold text-slate-800 mono">₹0.00</span>'
+    
+    pending_str = f"{pending:02d}" if pending < 100 else str(pending)
+    
+    html = f'''<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>OOS AQUA - Bill {bill_number}</title>
+  <script src="https://cdn.tailwindcss.com"></script>
+  <link href="https://fonts.googleapis.com/css2?family=Plus+Jakarta+Sans:wght@400;500;600;700;800&family=JetBrains+Mono:wght@500;600&display=swap" rel="stylesheet">
+  <style>
+    body {{
+      font-family: 'Plus Jakarta Sans', sans-serif;
+      background-color: #f1f5f9;
+      color: #0f172a;
+      -webkit-print-color-adjust: exact;
+      print-color-adjust: exact;
+    }}
+    .mono {{
+      font-family: 'JetBrains Mono', monospace;
+    }}
+    @media print {{
+      body {{
+        background: white;
+        padding: 0;
+      }}
+      .no-print {{
+        display: none !important;
+      }}
+      .print-shadow-none {{
+        box-shadow: none !important;
+        border: 1px solid #e2e8f0;
+      }}
+      @page {{
+        size: A4 portrait;
+        margin: 12mm;
+      }}
+    }}
+  </style>
+</head>
+<body class="p-3 sm:p-6 md:p-8 flex flex-col items-center min-h-screen">
+
+  <!-- Action Bar for PDF / Print -->
+  <div class="w-full max-w-2xl mb-4 flex items-center justify-between no-print bg-white p-3 rounded-xl border border-slate-200 shadow-sm">
+    <div class="flex items-center gap-2">
+      <span class="inline-flex items-center justify-center w-8 h-8 rounded-lg bg-cyan-50 text-cyan-700">
+        <svg class="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+          <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9 12h6m-6 4h6m2 5H7a2 2 0 01-2-2V5a2 2 0 012-2h5.586a1 1 0 01.707.293l5.414 5.414a1 1 0 01.293.707V19a2 2 0 01-2 2z"></path>
+        </svg>
+      </span>
+      <div>
+        <p class="text-xs font-semibold text-slate-900">Printable Format Ready</p>
+        <p class="text-[11px] text-slate-500">A4 & Mobile Print Optimized</p>
+      </div>
+    </div>
+    <div class="flex items-center gap-2">
+      <button onclick="window.print()" class="inline-flex items-center gap-1.5 px-3.5 py-1.5 bg-cyan-600 hover:bg-cyan-700 text-white text-xs font-medium rounded-lg shadow-sm transition">
+        <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+          <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M17 17h2a2 2 0 002-2v-4a2 2 0 00-2-2H5a2 2 0 00-2 2v4a2 2 0 002 2h2m2 4h6a2 2 0 002-2v-4a2 2 0 00-2-2H9a2 2 0 00-2 2v4a2 2 0 002 2zm8-12V5a2 2 0 00-2-2H9a2 2 0 00-2 2v4h10z"></path>
+        </svg>
+        <span>Print / Save PDF</span>
+      </button>
+      <a href="/" class="inline-flex items-center gap-1 px-3 py-1.5 bg-slate-100 text-slate-700 text-xs font-medium rounded-lg hover:bg-slate-200 transition">← Back</a>
+    </div>
+  </div>
+
+  <!-- Bill / Challan Document Card -->
+  <div class="w-full max-w-2xl bg-white rounded-2xl border border-slate-200/90 shadow-xl overflow-hidden print-shadow-none">
+    
+    <!-- Top Accent Bar -->
+    <div class="h-2.5 bg-gradient-to-r from-cyan-500 via-sky-500 to-blue-600"></div>
+
+    <!-- Header Section -->
+    <div class="p-5 sm:p-7 border-b border-slate-100">
+      <div class="flex flex-col sm:flex-row sm:items-start justify-between gap-4">
+        
+        <!-- Brand & Supplier Details -->
+        <div class="flex items-start gap-3.5">
+          <div class="w-14 h-14 rounded-xl border border-cyan-100 bg-cyan-50/50 p-1.5 flex-shrink-0 flex items-center justify-center overflow-hidden">
+            <span class="text-2xl font-extrabold text-cyan-700">💧</span>
+          </div>
+          <div>
+            <div class="flex items-center gap-2">
+              <h1 class="text-xl sm:text-2xl font-extrabold tracking-tight text-slate-900">OOS AQUA</h1>
+              <span class="text-[10px] uppercase font-bold tracking-widest px-2 py-0.5 rounded-full bg-cyan-100 text-cyan-800">Natural Mineral Water</span>
+            </div>
+            <p class="text-xs font-semibold text-slate-700 mt-0.5">M/S CROSS LIGHT</p>
+            <p class="text-[12px] text-slate-500">Ranchi, Jharkhand</p>
+            <div class="flex items-center gap-2 mt-1 text-[12px] font-medium text-slate-600">
+              <span class="inline-flex items-center gap-1 text-cyan-700 font-semibold">
+                <svg class="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                  <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M3 5a2 2 0 012-2h3.28a1 1 0 01.948.684l1.498 4.493a1 1 0 01-.502 1.21l-2.257 1.13a11.042 11.042 0 005.516 5.516l1.13-2.257a1 1 0 011.21-.502l4.493 1.498a1 1 0 01.684.949V19a2 2 0 01-2 2h-1C9.716 21 3 14.284 3 6V5z"></path>
+                </svg>
+                +91 9117456957</span>
+            </div>
+          </div>
+        </div>
+
+        <!-- Document Badge & Meta -->
+        <div class="sm:text-right flex flex-col sm:items-end justify-between">
+          <div class="inline-block bg-slate-900 text-white px-3 py-1 rounded-lg text-xs font-bold tracking-wider uppercase">
+            Monthly Jar Delivery Challan
+          </div>
+          <div class="mt-2.5 space-y-0.5 text-xs text-slate-500">
+            <p><span class="text-slate-400">Bill / Card No:</span> <span class="font-semibold text-slate-800 mono">{bill_number}</span></p>
+            <p><span class="text-slate-400">Billing Cycle:</span> <span class="font-semibold text-slate-800">{month_name} {year}</span></p>
+          </div>
+        </div>
+      </div>
+
+      <!-- Customer Info Card -->
+      <div class="mt-5 grid grid-cols-1 sm:grid-cols-3 gap-3 p-3.5 bg-slate-50/80 rounded-xl border border-slate-200/70">
+        <div>
+          <span class="text-[10px] uppercase font-bold text-slate-400 tracking-wider">Customer Name</span>
+          <p class="text-sm font-bold text-slate-800 mt-0.5">{c['name']}</p>
+        </div>
+        <div>
+          <span class="text-[10px] uppercase font-bold text-slate-400 tracking-wider">Address / Flat No.</span>
+          <p class="text-sm font-semibold text-slate-700 mt-0.5">{c['address'] or 'N/A'}</p>
+        </div>
+        <div>
+          <span class="text-[10px] uppercase font-bold text-slate-400 tracking-wider">No. of Jars Holding</span>
+          <p class="text-sm font-bold text-cyan-800 mt-0.5 mono">{c['jars_holding']} Jars In-Hand</p>
+        </div>
+      </div>
+    </div>
+
+    <!-- Summary Metrics -->
+    <div class="grid grid-cols-3 divide-x divide-slate-100 bg-cyan-50/30 border-b border-slate-100 text-center py-3">
+      <div>
+        <span class="text-[10px] uppercase tracking-wider font-semibold text-slate-500">Total Filled Delivered</span>
+        <p class="text-lg font-bold text-slate-900 mono">{td} <span class="text-xs font-medium text-slate-500">Jars</span></p>
+      </div>
+      <div>
+        <span class="text-[10px] uppercase tracking-wider font-semibold text-slate-500">Total Empty Received</span>
+        <p class="text-lg font-bold text-slate-900 mono">{tr} <span class="text-xs font-medium text-slate-500">Jars</span></p>
+      </div>
+      <div>
+        <span class="text-[10px] uppercase tracking-wider font-semibold text-cyan-800">Pending Empty Jars</span>
+        <p class="text-lg font-bold text-cyan-700 mono">{pending_str} <span class="text-xs font-medium text-cyan-600">Jars</span></p>
+      </div>
+    </div>
+
+    <!-- Delivery Log Table -->
+    <div class="p-4 sm:p-6">
+      <div class="flex items-center justify-between mb-3">
+        <h3 class="text-xs font-bold uppercase tracking-wider text-slate-700">Delivery Log &amp; Register Entries</h3>
+        <span class="text-[11px] text-slate-400 italic">Clean electronic ledger (Verified records)</span>
+      </div>
+
+      <div class="overflow-x-auto rounded-xl border border-slate-200">
+        <table class="w-full text-left text-xs border-collapse">
+          <thead>
+            <tr class="bg-slate-100/80 text-slate-600 font-semibold border-b border-slate-200 text-[11px] uppercase tracking-wider">
+              <th class="py-2.5 px-3">#</th>
+              <th class="py-2.5 px-3">Date</th>
+              <th class="py-2.5 px-3">Description / Batch</th>
+              <th class="py-2.5 px-3 text-center bg-cyan-50/60 text-cyan-900">Delivered Filled</th>
+              <th class="py-2.5 px-3 text-center bg-sky-50/60 text-sky-900">Received Empty</th>
+              <th class="py-2.5 px-3 text-center">Status</th>
+            </tr>
+          </thead>
+          <tbody class="divide-y divide-slate-100 text-slate-700">
+            {table_rows}
+          </tbody>
+          <tfoot class="bg-slate-50 font-bold border-t-2 border-slate-200 text-slate-800">
+            <tr>
+              <td colspan="3" class="py-3 px-3 text-right text-xs uppercase tracking-wider text-slate-600">Total Count:</td>
+              <td class="py-3 px-3 text-center text-cyan-900 bg-cyan-100/50 text-sm mono font-extrabold">{td}</td>
+              <td class="py-3 px-3 text-center text-sky-900 bg-sky-100/50 text-sm mono font-extrabold">{tr}</td>
+              <td class="py-3 px-3 text-center text-[11px] text-cyan-800">{pending} Balance</td>
+            </tr>
+          </tfoot>
+        </table>
+      </div>
+
+      <!-- Financial Section -->
+      <div class="mt-5 grid grid-cols-1 sm:grid-cols-2 gap-4 items-start">
+        
+        <!-- Terms & Payment -->
+        <div class="p-3.5 bg-slate-50 rounded-xl border border-slate-200/80 text-xs">
+          <p class="font-bold text-slate-800 mb-1 flex items-center gap-1.5">
+            <svg class="w-4 h-4 text-cyan-600" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+              <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M13 16h-1v-4h-1m1-4h.01M21 12a9 9 0 11-18 0 9 9 0 0118 0z"></path>
+            </svg>
+            Terms &amp; Payment Modes
+          </p>
+          <ul class="text-[11px] text-slate-600 space-y-1 mt-2 list-disc list-inside">
+            <li>Accepted: UPI, Cash, or Net Banking.</li>
+            <li>GPay / PhonePe UPI: <span class="font-bold text-slate-800 mono">9117456957@ybl</span></li>
+            <li>Please return empty jars in good condition to avoid deposit forfeiture.</li>
+          </ul>
+        </div>
+
+        <!-- Billing Breakdown -->
+        <div class="p-4 bg-gradient-to-br from-cyan-50/70 to-blue-50/50 rounded-xl border border-cyan-200/70 space-y-2">
+          <div class="flex justify-between text-xs text-slate-600">
+            <span>20L Mineral Jars Delivered:</span>
+            <span class="font-semibold text-slate-800 mono">{td} Jars</span>
+          </div>
+          <div class="flex justify-between text-xs text-slate-600">
+            <span>Rate per Jar:</span>
+            <span class="font-semibold text-slate-800 mono">₹{c['price_per_jar']:.2f}</span>
+          </div>
+          <div class="flex justify-between text-xs text-slate-600">
+            <span>Empty Jar Security Deposit:</span>
+            {security_display}
+          </div>
+          <div class="flex justify-between text-xs text-slate-600 pt-1 border-t border-cyan-200/50">
+            <span>Current Bill Amount:</span>
+            <span class="font-semibold text-slate-800 mono">₹{current_bill:.2f}</span>
+          </div>
+          <div class="flex justify-between text-xs text-slate-600">
+            <span>Previous Dues / Balance:</span>
+            <span class="font-semibold text-slate-800 mono">₹{c['previous_dues']:.2f}</span>
+          </div>
+          <div class="border-t border-cyan-200/80 pt-2 flex justify-between items-baseline">
+            <span class="text-xs font-bold text-slate-900 uppercase tracking-wide">Total Net Payable:</span>
+            <span class="text-lg font-black text-cyan-900 mono">₹{total_payable:.2f}</span>
+          </div>
+        </div>
+      </div>
+
+      <!-- Signature Section -->
+      <div class="mt-8 pt-5 border-t border-slate-200 grid grid-cols-2 gap-6 text-center">
+        <div>
+          <div class="h-12 flex items-center justify-center">
+            <div class="px-3 py-1 rounded border border-dashed border-slate-300 text-slate-400 text-[11px] uppercase tracking-wider">
+              Customer Confirmation
+            </div>
+          </div>
+          <p class="text-xs font-semibold text-slate-700 mt-1">Customer Acknowledgment</p>
+          <p class="text-[10px] text-slate-400">Digitally Verified &amp; Accepted</p>
+        </div>
+
+        <div>
+          <div class="h-12 flex items-center justify-center">
+            <div class="px-4 py-1.5 rounded-lg border border-cyan-300 bg-cyan-50 text-cyan-800 text-[11px] font-bold uppercase tracking-wide">
+              M/S CROSS LIGHT
+            </div>
+          </div>
+          <p class="text-xs font-semibold text-slate-800 mt-1">Authorized Dispatch Manager</p>
+          <p class="text-[10px] text-slate-400">OOS AQUA (Ranchi, Jharkhand)</p>
+        </div>
+      </div>
+
+    </div>
+
+    <!-- Footer -->
+    <div class="bg-slate-900 text-slate-400 px-6 py-3 text-center text-[11px] flex flex-col sm:flex-row items-center justify-between gap-1">
+      <span>Thank you for choosing <strong>OOS AQUA</strong> – Pure Natural Mineral Water.</span>
+      <span class="text-slate-500">Helpline: +91 9608107897</span>
+    </div>
+
+  </div>
+
+</body>
+</html>'''
+    
+    conn.close()
+    
+    response = make_response(html)
+    response.headers["Content-Type"] = "text/html"
+    return response
+
+if __name__ == '__main__':
+    app.run(debug=True, port=5000)

@@ -1,0 +1,8 @@
+*.db
+__pycache__/
+.venv/
+venv/
+ui_design/
+bill_template/
+share.py
+*.zip
