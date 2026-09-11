@@ -92,6 +92,12 @@ def init_db():
             c.execute(f"ALTER TABLE customers ADD COLUMN {col} {col_def}")
         except sqlite3.OperationalError:
             pass # Column likely already exists
+    
+    # Add is_deleted to entries table too
+    try:
+        c.execute("ALTER TABLE entries ADD COLUMN is_deleted INTEGER DEFAULT 0")
+    except sqlite3.OperationalError:
+        pass
             
     conn.commit()
     conn.close()
@@ -175,7 +181,7 @@ def manage_entries():
         month = request.args.get('month')
         year = request.args.get('year')
         
-        query = 'SELECT e.*, c.name FROM entries e JOIN customers c ON e.customer_id = c.id WHERE 1=1'
+        query = 'SELECT e.*, c.name FROM entries e JOIN customers c ON e.customer_id = c.id WHERE e.is_deleted = 0'
         params = []
         
         if date_filter:
@@ -217,12 +223,15 @@ def manage_entries():
 def delete_entry(id):
     conn = get_db()
     c = conn.cursor()
+    # Backup before any delete
+    backup_database("before_entry_delete")
     # Need to revert jars_holding
-    entry = c.execute('SELECT customer_id, jars_delivered, jars_returned FROM entries WHERE id = ?', (id,)).fetchone()
+    entry = c.execute('SELECT customer_id, jars_delivered, jars_returned FROM entries WHERE id = ? AND is_deleted = 0', (id,)).fetchone()
     if entry:
         net_jars = entry['jars_delivered'] - entry['jars_returned']
         c.execute('UPDATE customers SET jars_holding = jars_holding - ? WHERE id = ?', (net_jars, entry['customer_id']))
-        c.execute('DELETE FROM entries WHERE id = ?', (id,))
+        # Soft delete - data preserved, just hidden
+        c.execute('UPDATE entries SET is_deleted = 1 WHERE id = ?', (id,))
         conn.commit()
     conn.close()
     return jsonify({'success': True})
@@ -244,7 +253,7 @@ def get_billing():
     pending_dues = 0
     
     for c in customers:
-        entries = conn.execute('SELECT SUM(jars_delivered) as td, SUM(jars_returned) as tr FROM entries WHERE customer_id = ? AND date LIKE ?', (c['id'], like_date)).fetchone()
+        entries = conn.execute('SELECT SUM(jars_delivered) as td, SUM(jars_returned) as tr FROM entries WHERE customer_id = ? AND date LIKE ? AND is_deleted = 0', (c['id'], like_date)).fetchone()
         
         td = entries['td'] or 0
         tr = entries['tr'] or 0
@@ -291,7 +300,7 @@ def record_payment():
     
     # Calculate current bill for this month
     like_date = f"{year}-{month.zfill(2)}-%"
-    entry_stats = conn.execute('SELECT SUM(jars_delivered) as td FROM entries WHERE customer_id = ? AND date LIKE ?', (customer_id, like_date)).fetchone()
+    entry_stats = conn.execute('SELECT SUM(jars_delivered) as td FROM entries WHERE customer_id = ? AND date LIKE ? AND is_deleted = 0', (customer_id, like_date)).fetchone()
     td = entry_stats['td'] or 0
     current_bill = td * c['price_per_jar']
     total_payable = current_bill + c['previous_dues']
@@ -323,12 +332,12 @@ def get_stats():
     conn = get_db()
     
     # Today stats
-    stats = conn.execute('SELECT SUM(jars_delivered) as td, SUM(jars_returned) as tr FROM entries WHERE date = ?', (date_filter,)).fetchone()
+    stats = conn.execute('SELECT SUM(jars_delivered) as td, SUM(jars_returned) as tr FROM entries WHERE date = ? AND is_deleted = 0', (date_filter,)).fetchone()
     
     # Yesterday stats for comparison
     from datetime import timedelta
     yesterday = (datetime.strptime(date_filter, "%Y-%m-%d") - timedelta(days=1)).strftime("%Y-%m-%d")
-    ystats = conn.execute('SELECT SUM(jars_delivered) as td FROM entries WHERE date = ?', (yesterday,)).fetchone()
+    ystats = conn.execute('SELECT SUM(jars_delivered) as td FROM entries WHERE date = ? AND is_deleted = 0', (yesterday,)).fetchone()
     
     # Overall Customers stats
     cust_stats = conn.execute('SELECT COUNT(*) as ac, SUM(jars_holding) as jc, SUM(jar_security_deposit) as sp, SUM(previous_dues) as pd FROM customers WHERE is_deleted = 0').fetchone()
@@ -364,7 +373,7 @@ def get_invoice():
         return "Customer not found", 404
         
     like_date = f"{year}-{month.zfill(2)}-%"
-    entries = conn.execute('SELECT * FROM entries WHERE customer_id = ? AND date LIKE ? ORDER BY date', (customer_id, like_date)).fetchall()
+    entries = conn.execute('SELECT * FROM entries WHERE customer_id = ? AND date LIKE ? AND is_deleted = 0 ORDER BY date', (customer_id, like_date)).fetchall()
     
     td = sum(e['jars_delivered'] for e in entries)
     tr = sum(e['jars_returned'] for e in entries)
