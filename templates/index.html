@@ -166,8 +166,12 @@
             </select>
             <select id="billing-year" class="w-28 bg-white border border-slate-200 rounded-xl px-4 py-2.5 text-sm font-bold text-slate-700 shadow-sm focus:outline-none">
                 <option value="2024">2024</option>
-                <option value="2025" selected>2025</option>
+                <option value="2025">2025</option>
                 <option value="2026">2026</option>
+                <option value="2027">2027</option>
+                <option value="2028">2028</option>
+                <option value="2029">2029</option>
+                <option value="2030">2030</option>
             </select>
         </div>
 
@@ -331,6 +335,13 @@
         document.getElementById('entry-date').valueAsDate = new Date();
         const dateStr = new Date().toLocaleDateString('en-US', { weekday: 'short', month: 'short', day: 'numeric' });
         document.getElementById('daily-date-badge').innerText = dateStr;
+        
+        // Auto-select current month and year in billing tab
+        const now = new Date();
+        const curMonth = String(now.getMonth() + 1).padStart(2, '0');
+        const curYear = String(now.getFullYear());
+        document.getElementById('billing-month').value = curMonth;
+        document.getElementById('billing-year').value = curYear;
         
         loadCustomers();
         loadDailyStats();
@@ -546,6 +557,32 @@
             const dueColor = item.total_payable > 0 ? "text-red-500 bg-red-50" : "text-green-600 bg-green-50";
             const dueText = item.total_payable > 0 ? `Due ₹${item.total_payable}` : "Paid";
             
+            const paymentSection = item.total_payable > 0 ? `
+                <div class="flex gap-2 mt-3">
+                    <button onclick="recordPayment(${c.id}, 'full', 0)" class="flex-1 bg-emerald-500 hover:bg-emerald-600 text-white font-bold py-2.5 rounded-xl text-xs flex items-center justify-center gap-1 transition active:scale-[0.98] shadow-sm">
+                        <span class="material-symbols-outlined text-[16px]">check_circle</span> Fully Paid
+                    </button>
+                    <button onclick="toggleCustomPayment(${c.id})" class="flex-1 bg-amber-500 hover:bg-amber-600 text-white font-bold py-2.5 rounded-xl text-xs flex items-center justify-center gap-1 transition active:scale-[0.98] shadow-sm">
+                        <span class="material-symbols-outlined text-[16px]">payments</span> Custom Amount
+                    </button>
+                </div>
+                <div id="custom-pay-${c.id}" class="hidden mt-3 bg-amber-50 p-3 rounded-xl border border-amber-200 space-y-2">
+                    <label class="text-[10px] font-bold text-amber-700 uppercase">Enter Paid Amount (₹)</label>
+                    <div class="flex gap-2">
+                        <input type="number" id="pay-amount-${c.id}" placeholder="e.g. 3000" class="flex-1 bg-white border border-amber-300 rounded-lg px-3 py-2 text-sm font-bold focus:outline-none focus:border-amber-500" min="0" max="${item.total_payable}">
+                        <button onclick="recordPayment(${c.id}, 'partial', document.getElementById('pay-amount-${c.id}').value)" class="bg-amber-600 hover:bg-amber-700 text-white font-bold px-4 py-2 rounded-lg text-xs transition">
+                            Save
+                        </button>
+                    </div>
+                    <p class="text-[10px] text-amber-600">Total Due: ₹${item.total_payable} | Remaining will be added as dues for next month</p>
+                </div>
+            ` : `
+                <div class="mt-3 bg-emerald-50 border border-emerald-200 rounded-xl p-3 text-center">
+                    <span class="material-symbols-outlined text-emerald-500 text-[20px]">verified</span>
+                    <p class="text-xs font-bold text-emerald-700 mt-1">All Dues Cleared</p>
+                </div>
+            `;
+            
             container.innerHTML += `
                 <div class="bg-white rounded-2xl p-4 shadow-sm border border-slate-100">
                     <div class="flex justify-between items-start mb-3 border-b border-slate-50 pb-3">
@@ -589,6 +626,8 @@
                     <button onclick="downloadInvoice(${c.id})" class="w-full border-2 border-[#0891b2] text-[#0891b2] font-bold py-2 rounded-xl text-sm flex items-center justify-center gap-1 hover:bg-cyan-50">
                         <span class="material-symbols-outlined text-[18px]">download</span> Download PDF Bill
                     </button>
+                    
+                    ${paymentSection}
                 </div>
             `;
         });
@@ -604,6 +643,42 @@
         const month = document.getElementById('billing-month').value;
         const year = document.getElementById('billing-year').value;
         window.open(`/api/billing/invoice?customer_id=${custId}&month=${month}&year=${year}`, '_blank');
+    }
+
+    function toggleCustomPayment(custId) {
+        const el = document.getElementById(`custom-pay-${custId}`);
+        if(el) el.classList.toggle('hidden');
+    }
+
+    async function recordPayment(custId, type, amount) {
+        const month = document.getElementById('billing-month').value;
+        const year = document.getElementById('billing-year').value;
+        
+        if(type === 'full') {
+            if(!confirm('Mark as Fully Paid? This will clear all dues for this customer.')) return;
+        } else {
+            amount = parseFloat(amount);
+            if(!amount || amount <= 0) return alert('Please enter a valid payment amount.');
+            if(!confirm(`Record payment of ₹${amount}?`)) return;
+        }
+        
+        try {
+            const res = await fetch('/api/payment', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ customer_id: custId, type, amount, month, year })
+            });
+            const data = await res.json();
+            
+            if(data.success) {
+                alert(data.message);
+                loadBilling();       // Refresh billing cards
+                loadCustomers();     // Refresh customer data
+                loadDailyStats();    // Refresh dues total
+            } else {
+                alert('Error: ' + data.message);
+            }
+        } catch(e) { alert('Payment recording failed. Please try again.'); }
     }
 
     // --- TAB 3: CUSTOMERS ---

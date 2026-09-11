@@ -267,6 +267,56 @@ def get_billing():
         'invoices': billing_data
     })
 
+@app.route('/api/payment', methods=['POST'])
+def record_payment():
+    """Record payment - fully paid or custom amount"""
+    data = request.json
+    customer_id = data.get('customer_id')
+    payment_type = data.get('type')  # 'full' or 'partial'
+    amount = data.get('amount', 0)
+    month = data.get('month')
+    year = data.get('year')
+    
+    if not customer_id:
+        return jsonify({'success': False, 'message': 'Customer ID required'}), 400
+    
+    # Backup before payment operation
+    backup_database("before_payment")
+    
+    conn = get_db()
+    c = conn.execute('SELECT * FROM customers WHERE id = ?', (customer_id,)).fetchone()
+    if not c:
+        conn.close()
+        return jsonify({'success': False, 'message': 'Customer not found'}), 404
+    
+    # Calculate current bill for this month
+    like_date = f"{year}-{month.zfill(2)}-%"
+    entry_stats = conn.execute('SELECT SUM(jars_delivered) as td FROM entries WHERE customer_id = ? AND date LIKE ?', (customer_id, like_date)).fetchone()
+    td = entry_stats['td'] or 0
+    current_bill = td * c['price_per_jar']
+    total_payable = current_bill + c['previous_dues']
+    
+    if payment_type == 'full':
+        # Full payment - clear all dues
+        new_dues = 0.0
+        paid_amount = total_payable
+    else:
+        # Partial payment - remaining becomes new dues
+        paid_amount = float(amount)
+        new_dues = max(0, total_payable - paid_amount)
+    
+    # Update customer's previous_dues
+    conn.execute('UPDATE customers SET previous_dues = ? WHERE id = ?', (new_dues, customer_id))
+    conn.commit()
+    conn.close()
+    
+    return jsonify({
+        'success': True,
+        'paid_amount': paid_amount,
+        'remaining_dues': new_dues,
+        'message': f'Payment of Rs.{paid_amount:.0f} recorded. Remaining dues: Rs.{new_dues:.0f}'
+    })
+
 @app.route('/api/stats', methods=['GET'])
 def get_stats():
     date_filter = request.args.get('date', date.today().isoformat())
@@ -533,26 +583,20 @@ def get_invoice():
       <!-- Financial Calculation / Amount Due Section -->
       <div class="mt-5 grid grid-cols-1 sm:grid-cols-2 gap-4 items-start">
         
-        <!-- Payment & Bank / UPI Info WITH QR CODE -->
-        <div class="p-3.5 bg-slate-50 rounded-xl border border-slate-200/80 text-xs flex justify-between items-center">
-          <div>
-            <p class="font-bold text-slate-800 mb-1 flex items-center gap-1.5">
-              <svg class="w-4 h-4 text-cyan-600" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M13 16h-1v-4h-1m1-4h.01M21 12a9 9 0 11-18 0 9 9 0 0118 0z"></path>
-              </svg>
-              Terms &amp; Payment Modes
-            </p>
-            <ul class="text-[11px] text-slate-600 space-y-1 mt-2 list-disc list-inside">
-              <li class="">Accepted: UPI, Cash, or Net Banking.</li>
-              <li class="">GPay / PhonePe UPI: <span class="font-bold text-slate-800 mono">9117456957@ybl</span></li>
-              <li class="">Please return empty jars in good condition to avoid deposit forfeiture.</li>
-            </ul>
-          </div>
-          <!-- PhonePe QR Code -->
-          <div class="ml-2 flex-shrink-0 text-center">
-            <img src="/qr.jpg" alt="PhonePe QR" class="w-[72px] h-[72px] object-contain rounded-md border border-slate-200 shadow-sm mix-blend-multiply">
-            <p class="text-[8px] font-bold text-slate-500 mt-1 uppercase tracking-wider">Scan to Pay</p>
-          </div>
+        <!-- Payment & Bank / UPI Info -->
+        <div class="p-3.5 bg-slate-50 rounded-xl border border-slate-200/80 text-xs">
+          <p class="font-bold text-slate-800 mb-1 flex items-center gap-1.5">
+            <svg class="w-4 h-4 text-cyan-600" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+              <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M13 16h-1v-4h-1m1-4h.01M21 12a9 9 0 11-18 0 9 9 0 0118 0z"></path>
+            </svg>
+            Terms &amp; Payment Modes
+          </p>
+          <ul class="text-[11px] text-slate-600 space-y-1 mt-2 list-disc list-inside">
+            <li class="">Accepted: UPI, Cash, or Net Banking.</li>
+            <li class="">GPay / PhonePe UPI: <span class="font-bold text-slate-800 mono">9117456957@ybl</span></li>
+            <li class="">Please return empty jars in good condition to avoid deposit forfeiture.</li>
+            <li class="">Scan QR code on Page 2 to pay online.</li>
+          </ul>
         </div>
 
         <!-- Billing Breakdown Box -->
@@ -614,6 +658,70 @@ def get_invoice():
       <span class="text-slate-500">Helpline: +91 9608107897</span>
     </div>
 
+  </div>
+
+  <!-- PAGE 2: QR CODE PAYMENT PAGE -->
+  <div class="w-full max-w-2xl bg-white rounded-2xl border border-slate-200/90 shadow-xl overflow-hidden print-shadow-none mt-8" style="page-break-before: always;">
+    
+    <!-- Top Accent Bar -->
+    <div class="h-2.5 bg-gradient-to-r from-cyan-500 via-sky-500 to-blue-600"></div>
+    
+    <!-- QR Content -->
+    <div class="flex flex-col items-center justify-center py-12 px-6">
+      
+      <!-- Company Badge -->
+      <div class="flex items-center gap-3 mb-6">
+        <div class="w-12 h-12 rounded-xl border border-cyan-100 bg-cyan-50/50 p-1 flex items-center justify-center overflow-hidden">
+          <img src="/logo.png" alt="OOS AQUA Logo" class="w-full h-full object-contain mix-blend-multiply">
+        </div>
+        <div>
+          <h2 class="text-xl font-extrabold text-slate-900">OOS AQUA</h2>
+          <p class="text-[11px] text-slate-500 font-semibold">M/S CROSS LIGHT, Ranchi</p>
+        </div>
+      </div>
+      
+      <!-- Payment Title -->
+      <div class="bg-gradient-to-r from-purple-600 to-indigo-600 text-white px-6 py-2 rounded-full text-sm font-bold tracking-wide mb-6 shadow-lg">
+        Scan &amp; Pay via PhonePe / GPay / Paytm
+      </div>
+      
+      <!-- QR Code -->
+      <div class="bg-white p-4 rounded-2xl border-2 border-slate-200 shadow-lg mb-6">
+        <img src="/qr.jpg" alt="PhonePe QR Code" class="w-64 h-64 object-contain">
+      </div>
+      
+      <!-- UPI Details -->
+      <div class="text-center space-y-2 mb-6">
+        <p class="text-lg font-bold text-slate-800">Aman Kumar Choudhry</p>
+        <div class="bg-slate-100 rounded-xl px-6 py-3 inline-block">
+          <p class="text-[10px] font-bold text-slate-400 uppercase tracking-wider mb-1">UPI ID</p>
+          <p class="text-lg font-bold text-[#00687a] mono tracking-wide">9117456957@ybl</p>
+        </div>
+      </div>
+      
+      <!-- Amount Due Box -->
+      <div class="bg-gradient-to-br from-cyan-50 to-blue-50 border-2 border-cyan-200 rounded-2xl p-5 w-full max-w-sm text-center mb-6">
+        <p class="text-[10px] font-bold text-cyan-700 uppercase tracking-wider mb-1">Total Amount Payable</p>
+        <p class="text-4xl font-black text-cyan-900 mono">₹{total_payable:.2f}</p>
+        <p class="text-xs text-slate-500 mt-1">Bill: {bill_number} | {month_name} {year}</p>
+      </div>
+      
+      <!-- Payment Modes -->
+      <div class="flex gap-3 text-[11px] text-slate-500 font-semibold">
+        <span class="bg-slate-100 px-3 py-1 rounded-full">UPI</span>
+        <span class="bg-slate-100 px-3 py-1 rounded-full">PhonePe</span>
+        <span class="bg-slate-100 px-3 py-1 rounded-full">GPay</span>
+        <span class="bg-slate-100 px-3 py-1 rounded-full">Paytm</span>
+        <span class="bg-slate-100 px-3 py-1 rounded-full">Cash</span>
+      </div>
+      
+    </div>
+    
+    <!-- Footer -->
+    <div class="bg-slate-900 text-slate-400 px-6 py-3 text-center text-[11px]">
+      <span>Thank you for choosing <strong>OOS AQUA</strong> – Pure Natural Mineral Water. | Helpline: +91 9608107897</span>
+    </div>
+    
   </div>
 
 </body>
