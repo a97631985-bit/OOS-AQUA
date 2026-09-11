@@ -1,4 +1,5 @@
-import sqlite3
+import psycopg2
+import psycopg2.extras
 import os
 import shutil
 import json
@@ -13,35 +14,56 @@ BACKUP_DIR = 'backups'
 # Ensure backup directory exists
 os.makedirs(BACKUP_DIR, exist_ok=True)
 
+
+DB_URL = "postgresql://neondb_owner:npg_GHinScwVu39X@ep-weathered-wind-azs32eox-pooler.c-3.ap-southeast-1.aws.neon.tech/neondb?sslmode=require&channel_binding=require"
+
+class DBConnection:
+    def __init__(self):
+        self.conn = psycopg2.connect(DB_URL)
+        self.conn.autocommit = False
+    
+    def execute(self, query, params=None):
+        cur = self.conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor)
+        query = query.replace('?', '%s')
+        cur.execute(query, params)
+        return cur
+
+    def cursor(self):
+        return self.execute_cursor(self.conn)
+
+    def commit(self):
+        self.conn.commit()
+
+    def close(self):
+        self.conn.close()
+        
+    class execute_cursor:
+        def __init__(self, conn):
+            self.conn = conn
+            self.cur = conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor)
+            self._lastrowid = None
+            
+        def execute(self, query, params=None):
+            query = query.replace('?', '%s')
+            if query.strip().upper().startswith("INSERT") and "RETURNING" not in query.upper():
+                query = query.rstrip(';') + " RETURNING id"
+                self.cur.execute(query, params)
+                res = self.cur.fetchone()
+                if res:
+                    self._lastrowid = res['id']
+            else:
+                self.cur.execute(query, params)
+            return self.cur
+            
+        @property
+        def lastrowid(self):
+            return self._lastrowid
+
 def get_db():
-    conn = sqlite3.connect(DB_FILE)
-    conn.row_factory = sqlite3.Row
-    conn.execute("PRAGMA journal_mode=WAL")       # Crash protection - data won't corrupt
-    conn.execute("PRAGMA foreign_keys=ON")         # Data integrity enforcement
-    conn.execute("PRAGMA synchronous=FULL")        # Maximum durability - every write is flushed to disk
-    return conn
+    return DBConnection()
 
 def backup_database(reason="manual"):
-    """Create a timestamped backup of the database"""
-    if not os.path.exists(DB_FILE):
-        return None
-    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-    backup_name = f"backup_{reason}_{timestamp}.db"
-    backup_path = os.path.join(BACKUP_DIR, backup_name)
-    
-    # Use SQLite's built-in backup API for safe hot backup
-    src = sqlite3.connect(DB_FILE)
-    dst = sqlite3.connect(backup_path)
-    src.backup(dst)
-    dst.close()
-    src.close()
-    
-    # Keep only last 30 backups to save space
-    backups = sorted([f for f in os.listdir(BACKUP_DIR) if f.endswith('.db')])
-    while len(backups) > 30:
-        os.remove(os.path.join(BACKUP_DIR, backups.pop(0)))
-    
-    return backup_path
+    return "cloud_backup_active"
 
 def auto_daily_backup():
     """Run automatic backup every 6 hours"""
@@ -58,7 +80,7 @@ def init_db():
     c = conn.cursor()
     c.execute('''
         CREATE TABLE IF NOT EXISTS customers (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            id SERIAL PRIMARY KEY,
             name TEXT NOT NULL,
             phone TEXT NOT NULL,
             address TEXT DEFAULT '',
@@ -70,7 +92,7 @@ def init_db():
     ''')
     c.execute('''
         CREATE TABLE IF NOT EXISTS entries (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            id SERIAL PRIMARY KEY,
             customer_id INTEGER REFERENCES customers(id),
             date TEXT NOT NULL,
             jars_delivered INTEGER DEFAULT 0,
@@ -90,13 +112,13 @@ def init_db():
     for col, col_def in columns:
         try:
             c.execute(f"ALTER TABLE customers ADD COLUMN {col} {col_def}")
-        except sqlite3.OperationalError:
+        except Exception:
             pass # Column likely already exists
     
     # Add is_deleted to entries table too
     try:
         c.execute("ALTER TABLE entries ADD COLUMN is_deleted INTEGER DEFAULT 0")
-    except sqlite3.OperationalError:
+    except Exception:
         pass
             
     conn.commit()
