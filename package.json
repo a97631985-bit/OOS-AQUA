@@ -1,0 +1,9 @@
+{
+  "name": "oos-aqua",
+  "version": "1.0.0",
+  "private": true,
+  "description": "OOS AQUA water management - Netlify Functions + Neon Postgres",
+  "dependencies": {
+    "pg": "^8.13.1"
+  }
+}

@@ -1,6 +1,8 @@
 __pycache__/
 .venv/
 venv/
+node_modules/
+.env
 ui_design/
 bill_template/
 share.py
