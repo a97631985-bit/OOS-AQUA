@@ -343,9 +343,12 @@ def record_payment():
     
     return jsonify({
         'success': True,
+        'current_bill': current_bill,
+        'previous_dues': c['previous_dues'],
+        'total_payable': total_payable,
         'paid_amount': paid_amount,
         'remaining_dues': new_dues,
-        'message': f'Payment of Rs.{paid_amount:.0f} recorded. Remaining dues: Rs.{new_dues:.0f}'
+        'message': f'Payment of Rs.{paid_amount:.0f} recorded against total Rs.{total_payable:.0f} (bill Rs.{current_bill:.0f} + previous dues Rs.{c["previous_dues"]:.0f}). Dues: Rs.{new_dues:.0f}'
     })
 
 @app.route('/api/stats', methods=['GET'])

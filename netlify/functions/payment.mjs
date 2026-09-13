@@ -38,11 +38,16 @@ export default async (req) => {
 
     let paidAmount;
     let newDues;
+    let paidAmount;
+    let newDues;
     if (paymentType === 'full') {
+      // FULL = clear the ENTIRE payable: this month's bill + all previous dues.
       paidAmount = totalPayable;
       newDues = 0;
     } else {
+      if (!amount || amount <= 0) return error(400, 'Enter a valid payment amount');
       paidAmount = amount;
+      // PARTIAL = only pay this much; the rest carries over to next month's dues.
       newDues = Math.max(0, totalPayable - paidAmount);
     }
 
@@ -51,11 +56,16 @@ export default async (req) => {
       [newDues, customerId]
     );
 
+    const done = newDues === 0 ? 'fully cleared.' : `next month previous dues will be Rs.${newDues.toFixed(0)}.`;
+
     return json({
       success: true,
+      current_bill: currentBill,
+      previous_dues: customer.previous_dues,
+      total_payable: totalPayable,
       paid_amount: paidAmount,
       remaining_dues: newDues,
-      message: `Payment of Rs.${paidAmount.toFixed(0)} recorded. Remaining dues: Rs.${newDues.toFixed(0)}`,
+      message: `Payment of Rs.${paidAmount.toFixed(0)} recorded against total Rs.${totalPayable.toFixed(0)} (bill Rs.${currentBill.toFixed(0)} + previous dues Rs.${customer.previous_dues.toFixed(0)}). Dues ${done}`,
     });
   } catch (err) {
     console.error('[payment] failed', err);

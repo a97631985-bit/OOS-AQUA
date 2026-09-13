@@ -562,8 +562,8 @@
             
             const paymentSection = item.total_payable > 0 ? `
                 <div class="flex gap-2 mt-3">
-                    <button onclick="recordPayment(${c.id}, 'full', 0)" class="flex-1 bg-emerald-500 hover:bg-emerald-600 text-white font-bold py-2.5 rounded-xl text-xs flex items-center justify-center gap-1 transition active:scale-[0.98] shadow-sm">
-                        <span class="material-symbols-outlined text-[16px]">check_circle</span> Fully Paid
+                    <button onclick="recordPayment(${c.id}, 'full', ${item.total_payable})" class="flex-1 bg-emerald-500 hover:bg-emerald-600 text-white font-bold py-2.5 rounded-xl text-xs flex items-center justify-center gap-1 transition active:scale-[0.98] shadow-sm">
+                        <span class="material-symbols-outlined text-[16px]">check_circle</span> Fully Paid (₹${item.total_payable})
                     </button>
                     <button onclick="toggleCustomPayment(${c.id})" class="flex-1 bg-amber-500 hover:bg-amber-600 text-white font-bold py-2.5 rounded-xl text-xs flex items-center justify-center gap-1 transition active:scale-[0.98] shadow-sm">
                         <span class="material-symbols-outlined text-[16px]">payments</span> Custom Amount
@@ -658,11 +658,13 @@
         const year = document.getElementById('billing-year').value;
         
         if(type === 'full') {
-            if(!confirm('Mark as Fully Paid? This will clear all dues for this customer.')) return;
+            amount = parseFloat(amount);
+            if(!amount || amount <= 0) return alert('No payment due right now.');
+            if(!confirm(`Confirm FULL payment of ₹${amount}? This clears this month's bill AND all previous dues.`)) return;
         } else {
             amount = parseFloat(amount);
             if(!amount || amount <= 0) return alert('Please enter a valid payment amount.');
-            if(!confirm(`Record payment of ₹${amount}?`)) return;
+            if(!confirm(`Record payment of ₹${amount}? Remaining amount will carry to next month's dues.`)) return;
         }
         
         try {
