@@ -38,8 +38,6 @@ export default async (req) => {
 
     let paidAmount;
     let newDues;
-    let paidAmount;
-    let newDues;
     if (paymentType === 'full') {
       // FULL = clear the ENTIRE payable: this month's bill + all previous dues.
       paidAmount = totalPayable;
