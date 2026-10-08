@@ -58,6 +58,7 @@
             <button class="pill whitespace-nowrap px-4 py-1.5 rounded-full text-xs font-bold transition-all bg-slate-100 text-slate-500" onclick="switchTab('tab-billing')">Billing</button>
             <button class="pill whitespace-nowrap px-4 py-1.5 rounded-full text-xs font-bold transition-all bg-slate-100 text-slate-500" onclick="switchTab('tab-customers')">Customers</button>
             <button class="pill whitespace-nowrap px-4 py-1.5 rounded-full text-xs font-bold transition-all bg-slate-100 text-slate-500" onclick="switchTab('tab-dues')">Dues & Sec</button>
+            <button class="pill whitespace-nowrap px-4 py-1.5 rounded-full text-xs font-bold transition-all bg-slate-100 text-slate-500" onclick="switchTab('tab-udhaar')">Udhaar</button>
         </div>
     </header>
 
@@ -296,6 +297,52 @@
         </div>
     </div>
 
+    <!-- TAB 5: UDHAAR (CREDIT GIVEN LEDGER) -->
+    <div id="tab-udhaar" class="tab-content px-4 pt-6 pb-6">
+        <h2 class="font-bold text-sm text-slate-700 mb-3">Udhaar — Credit Given Ledger</h2>
+
+        <!-- Summary Cards -->
+        <div class="grid grid-cols-3 gap-2 mb-5">
+            <div class="bg-white rounded-3xl p-4 shadow-sm border border-slate-100 text-center">
+                <p class="text-[10px] font-bold text-slate-400 uppercase mb-1">Total Given</p>
+                <p class="text-xl font-extrabold text-slate-900" id="udhaar-given">₹0</p>
+                <p class="text-[10px] text-slate-400" id="udhaar-count">0 people</p>
+            </div>
+            <div class="bg-white rounded-3xl p-4 shadow-sm border border-slate-100 text-center">
+                <p class="text-[10px] font-bold text-slate-400 uppercase mb-1">Repaid Back</p>
+                <p class="text-xl font-extrabold text-emerald-600" id="udhaar-repaid">₹0</p>
+            </div>
+            <div class="bg-white rounded-3xl p-4 shadow-sm border border-slate-100 text-center">
+                <p class="text-[10px] font-bold text-slate-400 uppercase mb-1">Still Needed</p>
+                <p class="text-xl font-extrabold text-red-500" id="udhaar-remaining">₹0</p>
+            </div>
+        </div>
+
+        <!-- Add New Udhaar Form -->
+        <div class="bg-white rounded-3xl p-5 shadow-sm border border-slate-100 mb-5">
+            <p class="text-xs font-bold text-slate-700 mb-2">Add New Udhaar</p>
+            <div class="space-y-2.5">
+                <input type="text" id="udhaar-name" placeholder="Person name *" class="w-full bg-slate-50 border border-slate-200 rounded-xl px-4 py-2.5 text-sm shadow-sm focus:outline-none focus:border-[#0891b2]">
+                <div class="grid grid-cols-2 gap-2.5">
+                    <input type="tel" id="udhaar-phone" placeholder="Phone (optional)" class="w-full bg-slate-50 border border-slate-200 rounded-xl px-4 py-2.5 text-sm shadow-sm focus:outline-none focus:border-[#0891b2]">
+                    <input type="number" id="udhaar-amount" placeholder="Amount given (₹)" min="0" class="w-full bg-slate-50 border border-slate-200 rounded-xl px-4 py-2.5 text-sm shadow-sm focus:outline-none focus:border-[#0891b2]">
+                </div>
+                <input type="text" id="udhaar-note" placeholder="Note (e.g. advance, khan) — optional" class="w-full bg-slate-50 border border-slate-200 rounded-xl px-4 py-2.5 text-sm shadow-sm focus:outline-none focus:border-[#0891b2]">
+                <button onclick="addUdhaar()" class="w-full bg-[#0891b2] hover:bg-cyan-700 text-white font-bold py-3 rounded-xl text-sm flex items-center justify-center gap-1.5 transition active:scale-[0.98] shadow-sm">
+                    <span class="material-symbols-outlined text-[18px]">add_circle</span> Save Udhaar
+                </button>
+            </div>
+        </div>
+
+        <!-- Udhaar List -->
+        <div class="flex items-center justify-between mb-2">
+            <p class="text-xs font-bold text-slate-500 uppercase">Records</p>
+        </div>
+        <div class="space-y-4" id="udhaar-list">
+            <!-- Udhaar records loaded here -->
+        </div>
+    </div>
+
     <!-- Bottom Navigation -->
     <nav class="fixed bottom-0 left-0 w-full z-50 pointer-events-none">
         <div class="max-w-md mx-auto pointer-events-auto bg-white border-t border-slate-200 shadow-[0_-10px_40px_-15px_rgba(0,0,0,0.1)] rounded-t-3xl pb-safe">
@@ -319,6 +366,11 @@
                     <div class="nav-indicator absolute -top-3 w-8 h-1 bg-transparent rounded-b-full"></div>
                     <span class="material-symbols-outlined text-[24px] mb-1">shield</span>
                     <span class="text-[9px] font-bold">Security</span>
+                </button>
+                <button onclick="switchTab('tab-udhaar')" id="nav-udhaar" class="nav-btn flex flex-col items-center p-2 text-slate-400 w-16 relative">
+                    <div class="nav-indicator absolute -top-3 w-8 h-1 bg-transparent rounded-b-full"></div>
+                    <span class="material-symbols-outlined text-[24px] mb-1">payments</span>
+                    <span class="text-[9px] font-bold">Udhaar</span>
                 </button>
             </div>
         </div>
@@ -357,7 +409,7 @@
         document.querySelectorAll('#tab-pills .pill').forEach(el => {
             el.className = 'pill whitespace-nowrap px-4 py-1.5 rounded-full text-xs font-bold transition-all bg-slate-100 text-slate-500';
         });
-        const pillIndex = ['tab-daily', 'tab-billing', 'tab-customers', 'tab-dues'].indexOf(tabId);
+        const pillIndex = ['tab-daily', 'tab-billing', 'tab-customers', 'tab-dues', 'tab-udhaar'].indexOf(tabId);
         if(pillIndex >= 0) {
             const pill = document.querySelectorAll('#tab-pills .pill')[pillIndex];
             pill.className = 'pill active whitespace-nowrap px-4 py-1.5 rounded-full text-xs font-bold transition-all bg-[#0891b2] text-white shadow-md shadow-cyan-200';
@@ -383,6 +435,7 @@
         if(tabId === 'tab-billing') loadBilling();
         if(tabId === 'tab-customers') renderCustomers(customersData);
         if(tabId === 'tab-dues') renderDues(customersData);
+        if(tabId === 'tab-udhaar') loadUdhaar();
     }
 
     // Stepper function
@@ -869,6 +922,135 @@
             loadCustomers();
             loadDailyStats(); // refresh total dues
         } catch(e) { alert("Error saving"); }
+    }
+
+    // --- UDHAAR (CREDIT GIVEN LEDGER) ---
+
+    let udhaarData = null;
+
+    function money(n) {
+        return '₹' + Number(n || 0).toFixed(0);
+    }
+
+    async function loadUdhaar() {
+        try {
+            const res = await fetch('/api/udhaar');
+            udhaarData = await res.json();
+            renderUdhaar();
+        } catch(e) {
+            document.getElementById('udhaar-list').innerHTML = '<p class="text-sm text-red-500">Failed to load udhaar records.</p>';
+        }
+    }
+
+    function renderUdhaar() {
+        if(!udhaarData) return;
+        const s = udhaarData.summary || {};
+        document.getElementById('udhaar-given').textContent = money(s.total_given);
+        document.getElementById('udhaar-repaid').textContent = money(s.total_repaid);
+        document.getElementById('udhaar-remaining').textContent = money(s.total_remaining);
+        document.getElementById('udhaar-count').textContent = `${s.given_count || 0} people`;
+
+        const list = document.getElementById('udhaar-list');
+        const loans = udhaarData.loans || [];
+        if(!loans.length) {
+            list.innerHTML = '<div class="bg-white rounded-3xl p-5 shadow-sm border border-slate-100 text-center text-sm text-slate-400">No udhaar records yet. Add your first one above.</div>';
+            return;
+        }
+
+        list.innerHTML = loans.map(l => {
+            const repaid = Number(l.repaid || 0);
+            const given = Number(l.amount_given || 0);
+            const remaining = Math.max(0, given - repaid);
+            const settled = remaining <= 0;
+            const pct = given > 0 ? Math.min(100, Math.round((repaid / given) * 100)) : 0;
+            return `
+            <div class="bg-white rounded-3xl p-4 shadow-sm border border-slate-100 ${settled ? 'opacity-70' : ''}">
+                <div class="flex items-start justify-between gap-3">
+                    <div class="flex-1">
+                        <p class="font-bold text-sm text-slate-800">${l.person_name}</p>
+                        ${l.phone ? `<p class="text-xs text-slate-400 mt-0.5">${l.phone}</p>` : ''}
+                    </div>
+                    ${settled ? '<span class="px-2 py-1 rounded-full bg-emerald-100 text-emerald-700 text-[10px] font-bold">Settled</span>' : '<span class="px-2 py-1 rounded-full bg-amber-100 text-amber-700 text-[10px] font-bold">Pending</span>'}
+                </div>
+                ${l.note ? `<p class="text-xs text-slate-500 mt-1 italic">"${l.note}"</p>` : ''}
+
+                <div class="grid grid-cols-3 gap-2 mt-3 text-center">
+                    <div class="bg-slate-50 rounded-xl py-2">
+                        <p class="text-[10px] font-bold text-slate-400 uppercase">Given</p>
+                        <p class="text-sm font-extrabold text-slate-900">${money(given)}</p>
+                    </div>
+                    <div class="bg-emerald-50 rounded-xl py-2">
+                        <p class="text-[10px] font-bold text-emerald-500 uppercase">Repaid</p>
+                        <p class="text-sm font-extrabold text-emerald-600">${money(repaid)}</p>
+                    </div>
+                    <div class="bg-${settled ? 'emerald' : 'red'}-50 rounded-xl py-2">
+                        <p class="text-[10px] font-bold text-${settled ? 'emerald' : 'red'}-500 uppercase">Remaining</p>
+                        <p class="text-sm font-extrabold text-${settled ? 'emerald' : 'red'}-600">${money(remaining)}</p>
+                    </div>
+                </div>
+
+                <div class="mt-3 pt-3 border-t border-slate-100">
+                    ${!settled ? `
+                    <div class="flex gap-2">
+                        <div class="flex-1 flex items-center gap-1 bg-slate-50 rounded-xl px-2 border border-slate-200">
+                            <span class="text-slate-400 text-xs font-bold">₹</span>
+                            <input type="number" id="repay-amount-${l.id}" placeholder="Repay aasha" min="0" class="w-full bg-transparent py-2.5 text-sm outline-none" value="${Math.min(remaining, given)}">
+                        </div>
+                        <button onclick="repayUdhaar(${l.id})" class="bg-emerald-500 hover:bg-emerald-600 text-white font-bold px-3.5 rounded-xl text-xs transition active:scale-[0.98] flex items-center gap-1 shadow-sm">
+                            <span class="material-symbols-outlined text-[16px]">payments</span> Repay
+                        </button>
+                    </div>
+                    ` : '<p class="text-center text-xs text-emerald-600 font-semibold">Fully paid back. Record closed.</p>'}
+                    <div class="flex items-center justify-between mt-2">
+                        <button onclick="deleteUdhaar(${l.id}, '${l.person_name.replace(/'/g, "")}')" class="text-[11px] text-red-400 font-semibold">Hide record</button>
+                    </div>
+                </div>
+            </div>`;
+        }).join('');
+    }
+
+    async function addUdhaar() {
+        const name = document.getElementById('udhaar-name').value.trim();
+        const amount = parseFloat(document.getElementById('udhaar-amount').value);
+        if(!name) return alert('Person ka naam likho.');
+        if(!amount || amount <= 0) return alert('Amount sahi likho.');
+        const data = {
+            person_name: name,
+            phone: document.getElementById('udhaar-phone').value.trim(),
+            amount_given: amount,
+            note: document.getElementById('udhaar-note').value.trim()
+        };
+        try {
+            const res = await fetch('/api/udhaar', { method: 'POST', headers: {'Content-Type':'application/json'}, body: JSON.stringify(data) });
+            const json = await res.json();
+            if(!res.ok) return alert(json.message || 'Error saving');
+            document.getElementById('udhaar-name').value = '';
+            document.getElementById('udhaar-phone').value = '';
+            document.getElementById('udhaar-amount').value = '';
+            document.getElementById('udhaar-note').value = '';
+            loadUdhaar();
+        } catch(e) { alert('Error saving record'); }
+    }
+
+    async function repayUdhaar(id) {
+        const amount = parseFloat(document.getElementById(`repay-amount-${id}`).value);
+        if(!amount || amount <= 0) return alert('Repayment amount likho.');
+        if(!confirm(`₹${amount} repayment record karni hai?`)) return;
+        try {
+            const res = await fetch('/api/udhaar/repay', { method: 'POST', headers: {'Content-Type':'application/json'}, body: JSON.stringify({ udhaar_id: id, amount: amount }) });
+            const json = await res.json();
+            if(!res.ok) return alert(json.message || 'Error');
+            alert(json.message);
+            loadUdhaar();
+        } catch(e) { alert('Error saving repayment'); }
+    }
+
+    async function deleteUdhaar(id, name) {
+        if(!confirm(`"${name}" ki udhaar record hide kar dein? Data delete NAHI hoga — backup mein safe hai.`)) return;
+        try {
+            await fetch(`/api/udhaar?id=${id}`, { method: 'DELETE' });
+            loadUdhaar();
+        } catch(e) { alert('Error'); }
     }
     
     // Add change listener to entry date to reload data

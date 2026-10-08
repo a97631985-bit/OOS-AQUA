@@ -32,6 +32,27 @@ function ensureSchemaNow() {
       snapshot JSONB NOT NULL
     )
   `)).then(() => pool.query(`
+    CREATE TABLE IF NOT EXISTS udhaar (
+      id SERIAL PRIMARY KEY,
+      person_name TEXT NOT NULL,
+      phone TEXT DEFAULT '',
+      amount_given REAL NOT NULL DEFAULT 0,
+      note TEXT DEFAULT '',
+      is_deleted INTEGER DEFAULT 0,
+      created_at TIMESTAMPTZ NOT NULL DEFAULT now()
+    )
+  `)).then(() => pool.query(`
+    CREATE TABLE IF NOT EXISTS udhaar_payments (
+      id SERIAL PRIMARY KEY,
+      udhaar_id INTEGER REFERENCES udhaar(id),
+      amount REAL NOT NULL DEFAULT 0,
+      note TEXT DEFAULT '',
+      is_deleted INTEGER DEFAULT 0,
+      created_at TIMESTAMPTZ NOT NULL DEFAULT now()
+    )
+  `)).then(() => pool.query(`
+    CREATE INDEX IF NOT EXISTS idx_udhaar_payments_udhaar ON udhaar_payments (udhaar_id)
+  `)).then(() => pool.query(`
     CREATE INDEX IF NOT EXISTS idx_entries_customer_date ON entries (customer_id, date)
   `)).then(() => pool.query(`
     CREATE INDEX IF NOT EXISTS idx_entries_date ON entries (date)

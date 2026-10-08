@@ -7,7 +7,9 @@ const SNAPSHOT_SQL = `
     'export_date', now(),
     'app_name', 'OOS AQUA Water Management',
     'customers', (SELECT COALESCE(json_agg(row_to_json(c) ORDER BY c.id), '[]'::json) FROM customers c),
-    'entries', (SELECT COALESCE(json_agg(row_to_json(e) ORDER BY e.id), '[]'::json) FROM entries e)
+    'entries', (SELECT COALESCE(json_agg(row_to_json(e) ORDER BY e.id), '[]'::json) FROM entries e),
+    'udhaar', (SELECT COALESCE(json_agg(row_to_json(u) ORDER BY u.id), '[]'::json) FROM udhaar u),
+    'udhaar_payments', (SELECT COALESCE(json_agg(row_to_json(p) ORDER BY p.id), '[]'::json) FROM udhaar_payments p)
   )
 `;
 

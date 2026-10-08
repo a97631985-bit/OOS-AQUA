@@ -120,6 +120,30 @@ def init_db():
         c.execute("ALTER TABLE entries ADD COLUMN is_deleted INTEGER DEFAULT 0")
     except Exception:
         pass
+
+    # Udhaar (credit given) ledger - additive, never touches existing data
+    c.execute('''
+        CREATE TABLE IF NOT EXISTS udhaar (
+            id SERIAL PRIMARY KEY,
+            person_name TEXT NOT NULL,
+            phone TEXT DEFAULT '',
+            amount_given REAL NOT NULL DEFAULT 0,
+            note TEXT DEFAULT '',
+            is_deleted INTEGER DEFAULT 0,
+            created_at TIMESTAMPTZ NOT NULL DEFAULT now()
+        )
+    ''')
+    c.execute('''
+        CREATE TABLE IF NOT EXISTS udhaar_payments (
+            id SERIAL PRIMARY KEY,
+            udhaar_id INTEGER REFERENCES udhaar(id),
+            amount REAL NOT NULL DEFAULT 0,
+            note TEXT DEFAULT '',
+            is_deleted INTEGER DEFAULT 0,
+            created_at TIMESTAMPTZ NOT NULL DEFAULT now()
+        )
+    ''')
+    c.execute('CREATE INDEX IF NOT EXISTS idx_udhaar_payments_udhaar ON udhaar_payments (udhaar_id)')
             
     conn.commit()
     conn.close()
@@ -349,6 +373,101 @@ def record_payment():
         'paid_amount': paid_amount,
         'remaining_dues': new_dues,
         'message': f'Payment of Rs.{paid_amount:.0f} recorded against total Rs.{total_payable:.0f} (bill Rs.{current_bill:.0f} + previous dues Rs.{c["previous_dues"]:.0f}). Dues: Rs.{new_dues:.0f}'
+    })
+
+@app.route('/api/udhaar', methods=['GET', 'POST', 'DELETE'])
+def manage_udhaar():
+    conn = get_db()
+    if request.method == 'GET':
+        loans = conn.execute('''
+            SELECT u.id, u.person_name, u.phone, u.amount_given, u.note, u.is_deleted, u.created_at,
+                   COALESCE((SELECT SUM(p.amount) FROM udhaar_payments p WHERE p.udhaar_id = u.id AND p.is_deleted = 0), 0) AS repaid
+            FROM udhaar u
+            WHERE u.is_deleted = 0
+            ORDER BY u.id DESC
+        ''').fetchall()
+        payments = conn.execute('''
+            SELECT p.*, u.person_name FROM udhaar_payments p
+            JOIN udhaar u ON u.id = p.udhaar_id
+            WHERE p.is_deleted = 0 ORDER BY p.id DESC
+        ''').fetchall()
+        conn.close()
+        total_given = sum(float(l['amount_given']) for l in loans)
+        total_repaid = sum(float(l['repaid']) for l in loans)
+        return jsonify({
+            'loans': [dict(l) for l in loans],
+            'payments': [dict(p) for p in payments],
+            'summary': {
+                'given_count': len(loans),
+                'total_given': total_given,
+                'total_repaid': total_repaid,
+                'total_remaining': max(0, total_given - total_repaid)
+            }
+        })
+
+    if request.method == 'POST':
+        data = request.json
+        name = (data.get('person_name') or '').strip()
+        amount = float(data.get('amount_given', 0))
+        if not name:
+            conn.close()
+            return jsonify({'success': False, 'message': 'Person name is required'}), 400
+        if not amount or amount <= 0:
+            conn.close()
+            return jsonify({'success': False, 'message': 'Enter a valid amount given'}), 400
+        backup_database("before_udhaar_add")
+        c = conn.cursor()
+        c.execute('''
+            INSERT INTO udhaar (person_name, phone, amount_given, note)
+            VALUES (?, ?, ?, ?)
+        ''', (name, (data.get('phone') or '').strip(), amount, (data.get('note') or '').strip()))
+        conn.commit()
+        new_id = c.lastrowid
+        conn.close()
+        return jsonify({'success': True, 'id': new_id})
+
+    if request.method == 'DELETE':
+        udhaar_id = request.args.get('id')
+        if not udhaar_id:
+            conn.close()
+            return jsonify({'success': False, 'message': 'id is required'}), 400
+        backup_database("before_udhaar_delete")
+        conn.execute('UPDATE udhaar SET is_deleted = 1 WHERE id = ?', (udhaar_id,))
+        conn.commit()
+        conn.close()
+        return jsonify({'success': True, 'message': 'Udhaar record hidden. Data preserved in backups.'})
+
+@app.route('/api/udhaar/repay', methods=['POST'])
+def repay_udhaar():
+    data = request.json
+    udhaar_id = data.get('udhaar_id')
+    amount = float(data.get('amount', 0))
+    if not udhaar_id:
+        return jsonify({'success': False, 'message': 'udhaar_id is required'}), 400
+    if not amount or amount <= 0:
+        return jsonify({'success': False, 'message': 'Enter a valid repayment amount'}), 400
+
+    conn = get_db()
+    loan = conn.execute('SELECT * FROM udhaar WHERE id = ? AND is_deleted = 0', (udhaar_id,)).fetchone()
+    if not loan:
+        conn.close()
+        return jsonify({'success': False, 'message': 'Udhaar record not found'}), 404
+
+    backup_database("before_udhaar_repay")
+    repaid_row = conn.execute('SELECT COALESCE(SUM(amount), 0) AS repaid FROM udhaar_payments WHERE udhaar_id = ? AND is_deleted = 0', (udhaar_id,)).fetchone()
+    new_repaid = float(repaid_row['repaid']) + amount
+    remaining = max(0, float(loan['amount_given']) - new_repaid)
+    conn.execute('INSERT INTO udhaar_payments (udhaar_id, amount, note) VALUES (?, ?, ?)', (
+        udhaar_id, amount, (data.get('note') or '').strip()
+    ))
+    conn.commit()
+    conn.close()
+    return jsonify({
+        'success': True,
+        'udhaar_id': udhaar_id,
+        'repaid': new_repaid,
+        'remaining': remaining,
+        'message': f'Repayment of Rs.{amount:.0f} recorded. Remaining udhaar: Rs.{remaining:.0f}'
     })
 
 @app.route('/api/stats', methods=['GET'])
@@ -785,13 +904,17 @@ def export_data():
     conn = get_db()
     customers = conn.execute('SELECT * FROM customers').fetchall()  # Include deleted ones too
     entries = conn.execute('SELECT * FROM entries ORDER BY date').fetchall()
+    udhaar = conn.execute('SELECT * FROM udhaar ORDER BY id').fetchall()
+    udhaar_payments = conn.execute('SELECT * FROM udhaar_payments ORDER BY id').fetchall()
     conn.close()
     
     export = {
         'export_date': datetime.now().isoformat(),
         'app_name': 'OOS AQUA Water Management',
         'customers': [dict(c) for c in customers],
-        'entries': [dict(e) for e in entries]
+        'entries': [dict(e) for e in entries],
+        'udhaar': [dict(u) for u in udhaar],
+        'udhaar_payments': [dict(p) for p in udhaar_payments]
     }
     
     response = make_response(json.dumps(export, indent=2, ensure_ascii=False))

@@ -8,12 +8,16 @@ export default async () => {
     // Include soft-deleted records too, so full history is preserved.
     const customers = await query('SELECT * FROM customers ORDER BY id');
     const entries = await query('SELECT * FROM entries ORDER BY date, id');
+    const udhaar = await query('SELECT * FROM udhaar ORDER BY id');
+    const udhaar_payments = await query('SELECT * FROM udhaar_payments ORDER BY id');
 
     const exportData = {
       export_date: new Date().toISOString(),
       app_name: 'OOS AQUA Water Management',
       customers,
       entries,
+      udhaar,
+      udhaar_payments,
     };
 
     const filename = `oos_aqua_backup_${new Date().toISOString().replace(/[-:]/g, '').slice(0, 15).replace('T', '_')}.json`;
