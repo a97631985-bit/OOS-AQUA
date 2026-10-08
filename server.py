@@ -34,6 +34,9 @@ class DBConnection:
     def commit(self):
         self.conn.commit()
 
+    def rollback(self):
+        self.conn.rollback()
+
     def close(self):
         self.conn.close()
         
@@ -102,7 +105,7 @@ def init_db():
     
     # Try adding columns for backward compatibility if they don't exist
     columns = [
-        ('address', 'TEXT DEFAULT ""'),
+        ('address', "TEXT DEFAULT ''"),
         ('price_per_jar', 'REAL NOT NULL DEFAULT 35'),
         ('jar_security_deposit', 'REAL DEFAULT 0'),
         ('jars_holding', 'INTEGER DEFAULT 0'),
@@ -111,39 +114,48 @@ def init_db():
     ]
     for col, col_def in columns:
         try:
-            c.execute(f"ALTER TABLE customers ADD COLUMN {col} {col_def}")
+            c.execute(f"ALTER TABLE customers ADD COLUMN IF NOT EXISTS {col} {col_def}")
         except Exception:
-            pass # Column likely already exists
+            conn.rollback()  # recover aborted transaction and keep going
     
     # Add is_deleted to entries table too
     try:
-        c.execute("ALTER TABLE entries ADD COLUMN is_deleted INTEGER DEFAULT 0")
+        c.execute("ALTER TABLE entries ADD COLUMN IF NOT EXISTS is_deleted INTEGER DEFAULT 0")
     except Exception:
-        pass
+        conn.rollback()
 
     # Udhaar (credit given) ledger - additive, never touches existing data
-    c.execute('''
-        CREATE TABLE IF NOT EXISTS udhaar (
-            id SERIAL PRIMARY KEY,
-            person_name TEXT NOT NULL,
-            phone TEXT DEFAULT '',
-            amount_given REAL NOT NULL DEFAULT 0,
-            note TEXT DEFAULT '',
-            is_deleted INTEGER DEFAULT 0,
-            created_at TIMESTAMPTZ NOT NULL DEFAULT now()
-        )
-    ''')
-    c.execute('''
-        CREATE TABLE IF NOT EXISTS udhaar_payments (
-            id SERIAL PRIMARY KEY,
-            udhaar_id INTEGER REFERENCES udhaar(id),
-            amount REAL NOT NULL DEFAULT 0,
-            note TEXT DEFAULT '',
-            is_deleted INTEGER DEFAULT 0,
-            created_at TIMESTAMPTZ NOT NULL DEFAULT now()
-        )
-    ''')
-    c.execute('CREATE INDEX IF NOT EXISTS idx_udhaar_payments_udhaar ON udhaar_payments (udhaar_id)')
+    try:
+        c.execute('''
+            CREATE TABLE IF NOT EXISTS udhaar (
+                id SERIAL PRIMARY KEY,
+                person_name TEXT NOT NULL,
+                phone TEXT DEFAULT '',
+                amount_given REAL NOT NULL DEFAULT 0,
+                note TEXT DEFAULT '',
+                is_deleted INTEGER DEFAULT 0,
+                created_at TIMESTAMPTZ NOT NULL DEFAULT now()
+            )
+        ''')
+    except Exception:
+        conn.rollback()
+    try:
+        c.execute('''
+            CREATE TABLE IF NOT EXISTS udhaar_payments (
+                id SERIAL PRIMARY KEY,
+                udhaar_id INTEGER REFERENCES udhaar(id),
+                amount REAL NOT NULL DEFAULT 0,
+                note TEXT DEFAULT '',
+                is_deleted INTEGER DEFAULT 0,
+                created_at TIMESTAMPTZ NOT NULL DEFAULT now()
+            )
+        ''')
+    except Exception:
+        conn.rollback()
+    try:
+        c.execute('CREATE INDEX IF NOT EXISTS idx_udhaar_payments_udhaar ON udhaar_payments (udhaar_id)')
+    except Exception:
+        conn.rollback()
             
     conn.commit()
     conn.close()
