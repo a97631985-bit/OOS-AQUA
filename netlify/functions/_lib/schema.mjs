@@ -51,6 +51,23 @@ function ensureSchemaNow() {
       created_at TIMESTAMPTZ NOT NULL DEFAULT now()
     )
   `)).then(() => pool.query(`
+    CREATE TABLE IF NOT EXISTS payments (
+      id SERIAL PRIMARY KEY,
+      customer_id INTEGER REFERENCES customers(id),
+      amount REAL NOT NULL DEFAULT 0,
+      payment_type TEXT DEFAULT 'partial',
+      current_bill REAL DEFAULT 0,
+      previous_dues REAL DEFAULT 0,
+      total_payable REAL DEFAULT 0,
+      remaining_dues REAL DEFAULT 0,
+      bill_month INTEGER,
+      bill_year INTEGER,
+      is_deleted INTEGER DEFAULT 0,
+      created_at TIMESTAMPTZ NOT NULL DEFAULT now()
+    )
+  `)).then(() => pool.query(`
+    CREATE INDEX IF NOT EXISTS idx_payments_customer ON payments (customer_id)
+  `)).then(() => pool.query(`
     CREATE INDEX IF NOT EXISTS idx_udhaar_payments_udhaar ON udhaar_payments (udhaar_id)
   `)).then(() => pool.query(`
     CREATE INDEX IF NOT EXISTS idx_entries_customer_date ON entries (customer_id, date)

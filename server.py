@@ -156,6 +156,29 @@ def init_db():
         c.execute('CREATE INDEX IF NOT EXISTS idx_udhaar_payments_udhaar ON udhaar_payments (udhaar_id)')
     except Exception:
         conn.rollback()
+    try:
+        c.execute('''
+            CREATE TABLE IF NOT EXISTS payments (
+                id SERIAL PRIMARY KEY,
+                customer_id INTEGER REFERENCES customers(id),
+                amount REAL NOT NULL DEFAULT 0,
+                payment_type TEXT DEFAULT 'partial',
+                current_bill REAL DEFAULT 0,
+                previous_dues REAL DEFAULT 0,
+                total_payable REAL DEFAULT 0,
+                remaining_dues REAL DEFAULT 0,
+                bill_month INTEGER,
+                bill_year INTEGER,
+                is_deleted INTEGER DEFAULT 0,
+                created_at TIMESTAMPTZ NOT NULL DEFAULT now()
+            )
+        ''')
+    except Exception:
+        conn.rollback()
+    try:
+        c.execute('CREATE INDEX IF NOT EXISTS idx_payments_customer ON payments (customer_id)')
+    except Exception:
+        conn.rollback()
             
     conn.commit()
     conn.close()
@@ -372,13 +395,27 @@ def record_payment():
         paid_amount = float(amount)
         new_dues = max(0, total_payable - paid_amount)
     
-    # Update customer's previous_dues
+    # Update customer's previous_dues AND store a permanent payment record (receipt)
     conn.execute('UPDATE customers SET previous_dues = ? WHERE id = ?', (new_dues, customer_id))
+    cur = conn.cursor()
+    cur.execute('''
+        INSERT INTO payments (customer_id, amount, payment_type, current_bill, previous_dues, total_payable, remaining_dues, bill_month, bill_year)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+    ''', (
+        customer_id, paid_amount, 'full' if payment_type == 'full' else 'partial',
+        current_bill, c['previous_dues'], total_payable, new_dues,
+        int(month) if month else None, int(year) if year else None
+    ))
+    payment_id = cur.lastrowid
     conn.commit()
     conn.close()
-    
+
+    receipt_no = f"OA-R-{payment_id:05d}"
     return jsonify({
         'success': True,
+        'payment_id': payment_id,
+        'receipt_no': receipt_no,
+        'receipt_url': f'/api/payment/receipt?id={payment_id}',
         'current_bill': current_bill,
         'previous_dues': c['previous_dues'],
         'total_payable': total_payable,
@@ -481,6 +518,113 @@ def repay_udhaar():
         'remaining': remaining,
         'message': f'Repayment of Rs.{amount:.0f} recorded. Remaining udhaar: Rs.{remaining:.0f}'
     })
+
+@app.route('/api/payments', methods=['GET'])
+def list_payments():
+    """Full payment history (each payment ever recorded, with receipt no)."""
+    customer_id = request.args.get('customer_id')
+    conn = get_db()
+    query = '''
+        SELECT pm.*, c.name AS customer_name, c.phone AS customer_phone,
+               'OA-R-' || LPAD(pm.id::text, 5, '0') AS receipt_no
+        FROM payments pm
+        JOIN customers c ON c.id = pm.customer_id
+        WHERE pm.is_deleted = 0
+    '''
+    params = []
+    if customer_id:
+        query += ' AND pm.customer_id = ?'
+        params.append(customer_id)
+    query += ' ORDER BY pm.id DESC'
+    pmts = conn.execute(query, params).fetchall()
+    conn.close()
+    total = sum(float(p['amount']) for p in pmts)
+    return jsonify({
+        'payments': [dict(p) for p in pmts],
+        'count': len(pmts),
+        'total_collected': total
+    })
+
+@app.route('/api/payment/receipt', methods=['GET'])
+def payment_receipt():
+    """Printable payment receipt (Save as PDF from the browser)."""
+    pid = request.args.get('id')
+    if not pid:
+        return "Missing payment id", 400
+    conn = get_db()
+    p = conn.execute('''
+        SELECT pm.*, c.name AS customer_name, c.phone AS customer_phone, c.address AS customer_address,
+               'OA-R-' || LPAD(pm.id::text, 5, '0') AS receipt_no
+        FROM payments pm
+        JOIN customers c ON c.id = pm.customer_id
+        WHERE pm.id = ?
+    ''', (pid,)).fetchone()
+    conn.close()
+    if not p:
+        return "Payment not found", 404
+
+    month_names = ['January','February','March','April','May','June','July','August','September','October','November','December']
+    created = p['created_at']
+    paid_date = created.strftime('%d %B %Y') if created else ''
+    paid_time = created.strftime('%I:%M %p') if created else ''
+    cycle = f"{month_names[p['bill_month']-1]} {p['bill_year']}" if p['bill_month'] else '–'
+    type_label = 'Full & Final' if p['payment_type'] == 'full' else 'Partial'
+
+    def rup(n):
+        return f"₹{float(n or 0):.2f}"
+
+    html_doc = f'''<!DOCTYPE html>
+<html lang="en"><head><meta charset="UTF-8"><meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>OOS AQUA - Receipt {p['receipt_no']}</title>
+<script src="https://cdn.tailwindcss.com"></script>
+<link href="https://fonts.googleapis.com/css2?family=Plus+Jakarta+Sans:wght@400;500;600;700;800&family=JetBrains+Mono:wght@500;600&display=swap" rel="stylesheet">
+<style>body{{font-family:'Plus Jakarta Sans',sans-serif;background:#f1f5f9;color:#0f172a;-webkit-print-color-adjust:exact;print-color-adjust:exact}}.mono{{font-family:'JetBrains Mono',monospace}}@media print{{body{{background:#fff;padding:0}}.no-print{{display:none!important}}.print-shadow-none{{box-shadow:none!important;border:1px solid #e2e8f0}}@page{{size:A4 portrait;margin:12mm}}}}</style>
+</head><body class="p-3 sm:p-6 md:p-8 flex flex-col items-center min-h-screen">
+<div class="w-full max-w-2xl mb-4 flex items-center justify-between no-print bg-white p-3 rounded-xl border border-slate-200 shadow-sm">
+<div class="flex items-center gap-2"><span class="inline-flex items-center justify-center w-8 h-8 rounded-lg bg-emerald-50 text-emerald-700 font-bold">₹</span>
+<div><p class="text-xs font-semibold text-slate-900">Payment Receipt Ready</p><p class="text-[11px] text-slate-500">A4 &amp; Mobile Print Optimized</p></div></div>
+<div class="flex items-center gap-2">
+<button onclick="window.print()" class="px-3.5 py-1.5 bg-emerald-600 hover:bg-emerald-700 text-white text-xs font-medium rounded-lg shadow-sm">Print / Save PDF</button>
+<a href="/" class="px-3 py-1.5 bg-slate-100 text-slate-700 text-xs font-medium rounded-lg hover:bg-slate-200">← Back</a>
+</div></div>
+<div class="w-full max-w-2xl bg-white rounded-2xl border border-slate-200/90 shadow-xl overflow-hidden print-shadow-none">
+<div class="h-2.5 bg-gradient-to-r from-emerald-500 via-teal-500 to-cyan-600"></div>
+<div class="p-5 sm:p-7 border-b border-slate-100">
+<div class="flex flex-col sm:flex-row sm:items-start justify-between gap-4">
+<div class="flex items-start gap-3.5">
+<div class="w-14 h-14 rounded-xl border border-cyan-100 bg-cyan-50/50 p-1 flex items-center justify-center overflow-hidden"><img src="/logo.png" alt="OOS AQUA" class="w-full h-full object-contain mix-blend-multiply"></div>
+<div><div class="flex items-center gap-2"><h1 class="text-xl sm:text-2xl font-extrabold tracking-tight text-slate-900">OOS AQUA</h1>
+<span class="text-[10px] uppercase font-bold tracking-widest px-2 py-0.5 rounded-full bg-cyan-100 text-cyan-800">Natural Mineral Water</span></div>
+<p class="text-xs font-semibold text-slate-700 mt-0.5">M/S CROSS LIGHT</p><p class="text-[12px] text-slate-500">Ranchi, Jharkhand</p>
+<p class="text-[12px] text-slate-600 mt-1">Helpline: +91 9117456957</p></div></div>
+<div class="sm:text-right"><div class="inline-block bg-emerald-600 text-white px-3 py-1 rounded-lg text-xs font-bold tracking-wider uppercase">Payment Receipt</div>
+<div class="mt-2.5 space-y-0.5 text-xs text-slate-500">
+<p><span class="text-slate-400">Receipt No:</span> <span class="font-semibold text-slate-800 mono">{p['receipt_no']}</span></p>
+<p><span class="text-slate-400">Date:</span> <span class="font-semibold text-slate-800">{paid_date}, {paid_time}</span></p>
+<p><span class="text-slate-400">Billing Cycle:</span> <span class="font-semibold text-slate-800">{cycle}</span></p></div></div></div>
+<div class="mt-5 grid grid-cols-1 sm:grid-cols-3 gap-3 p-3.5 bg-slate-50/80 rounded-xl border border-slate-200/70">
+<div><span class="text-[10px] uppercase font-bold text-slate-400 tracking-wider">Received From</span><p class="text-sm font-bold text-slate-800 mt-0.5">{p['customer_name']}</p></div>
+<div><span class="text-[10px] uppercase font-bold text-slate-400 tracking-wider">Phone</span><p class="text-sm font-semibold text-slate-700 mt-0.5">{p['customer_phone'] or 'N/A'}</p></div>
+<div><span class="text-[10px] uppercase font-bold text-slate-400 tracking-wider">Address</span><p class="text-sm font-semibold text-slate-700 mt-0.5">{p['customer_address'] or 'N/A'}</p></div></div></div>
+<div class="p-5 sm:p-7">
+<div class="bg-gradient-to-br from-emerald-50 to-teal-50 border-2 border-emerald-200 rounded-2xl p-6 text-center mb-6">
+<p class="text-[11px] font-bold text-emerald-700 uppercase tracking-wider mb-1">Amount Received ({type_label})</p>
+<p class="text-4xl font-black text-emerald-800 mono">{rup(p['amount'])}</p></div>
+<div class="rounded-xl border border-slate-200 overflow-hidden">
+<div class="flex justify-between px-4 py-2.5 text-sm border-b border-slate-100 bg-slate-50/60"><span class="text-slate-500">Current Month Bill</span><span class="font-semibold text-slate-800 mono">{rup(p['current_bill'])}</span></div>
+<div class="flex justify-between px-4 py-2.5 text-sm border-b border-slate-100"><span class="text-slate-500">Previous Dues</span><span class="font-semibold text-slate-800 mono">{rup(p['previous_dues'])}</span></div>
+<div class="flex justify-between px-4 py-2.5 text-sm border-b border-slate-100 bg-slate-50/60"><span class="font-semibold text-slate-700">Total Payable</span><span class="font-bold text-slate-900 mono">{rup(p['total_payable'])}</span></div>
+<div class="flex justify-between px-4 py-2.5 text-sm border-b border-slate-100"><span class="font-semibold text-emerald-700">Amount Paid Now</span><span class="font-bold text-emerald-700 mono">{rup(p['amount'])}</span></div>
+<div class="flex justify-between px-4 py-3 text-sm bg-amber-50/50"><span class="font-bold text-slate-800">Remaining Dues (carried forward)</span><span class="font-black text-amber-700 mono">{rup(p['remaining_dues'])}</span></div></div>
+<div class="mt-8 pt-5 border-t border-slate-200 grid grid-cols-2 gap-6 text-center">
+<div><div class="h-12 flex items-center justify-center"><div class="px-3 py-1 rounded border border-dashed border-slate-300 text-slate-400 text-[11px] uppercase tracking-wider">Customer Confirmation</div></div><p class="text-xs font-semibold text-slate-700 mt-1">Customer Acknowledgment</p></div>
+<div><div class="h-12 flex items-center justify-center"><div class="px-3 py-1 rounded border border-dashed border-slate-300 text-slate-400 text-[11px] uppercase tracking-wider">For OOS AQUA</div></div><p class="text-xs font-semibold text-slate-700 mt-1">Authorized Signatory</p></div></div></div>
+<div class="bg-slate-900 text-slate-400 px-6 py-3 text-center text-[11px]"><span>This is a computer-generated receipt. Thank you for choosing <strong>OOS AQUA</strong>.</span></div>
+</div></body></html>'''
+
+    response = make_response(html_doc)
+    response.headers["Content-Type"] = "text/html"
+    return response
 
 @app.route('/api/stats', methods=['GET'])
 def get_stats():
@@ -918,6 +1062,7 @@ def export_data():
     entries = conn.execute('SELECT * FROM entries ORDER BY date').fetchall()
     udhaar = conn.execute('SELECT * FROM udhaar ORDER BY id').fetchall()
     udhaar_payments = conn.execute('SELECT * FROM udhaar_payments ORDER BY id').fetchall()
+    payments = conn.execute('SELECT * FROM payments ORDER BY id').fetchall()
     conn.close()
     
     export = {
@@ -926,7 +1071,8 @@ def export_data():
         'customers': [dict(c) for c in customers],
         'entries': [dict(e) for e in entries],
         'udhaar': [dict(u) for u in udhaar],
-        'udhaar_payments': [dict(p) for p in udhaar_payments]
+        'udhaar_payments': [dict(p) for p in udhaar_payments],
+        'payments': [dict(p) for p in payments]
     }
     
     response = make_response(json.dumps(export, indent=2, ensure_ascii=False))

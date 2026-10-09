@@ -10,6 +10,7 @@ export default async () => {
     const entries = await query('SELECT * FROM entries ORDER BY date, id');
     const udhaar = await query('SELECT * FROM udhaar ORDER BY id');
     const udhaar_payments = await query('SELECT * FROM udhaar_payments ORDER BY id');
+    const payments = await query('SELECT * FROM payments ORDER BY id');
 
     const exportData = {
       export_date: new Date().toISOString(),
@@ -18,6 +19,7 @@ export default async () => {
       entries,
       udhaar,
       udhaar_payments,
+      payments,
     };
 
     const filename = `oos_aqua_backup_${new Date().toISOString().replace(/[-:]/g, '').slice(0, 15).replace('T', '_')}.json`;

@@ -9,7 +9,8 @@ const SNAPSHOT_SQL = `
     'customers', (SELECT COALESCE(json_agg(row_to_json(c) ORDER BY c.id), '[]'::json) FROM customers c),
     'entries', (SELECT COALESCE(json_agg(row_to_json(e) ORDER BY e.id), '[]'::json) FROM entries e),
     'udhaar', (SELECT COALESCE(json_agg(row_to_json(u) ORDER BY u.id), '[]'::json) FROM udhaar u),
-    'udhaar_payments', (SELECT COALESCE(json_agg(row_to_json(p) ORDER BY p.id), '[]'::json) FROM udhaar_payments p)
+    'udhaar_payments', (SELECT COALESCE(json_agg(row_to_json(p) ORDER BY p.id), '[]'::json) FROM udhaar_payments p),
+    'payments', (SELECT COALESCE(json_agg(row_to_json(pm) ORDER BY pm.id), '[]'::json) FROM payments pm)
   )
 `;
 

@@ -59,6 +59,7 @@
             <button class="pill whitespace-nowrap px-4 py-1.5 rounded-full text-xs font-bold transition-all bg-slate-100 text-slate-500" onclick="switchTab('tab-customers')">Customers</button>
             <button class="pill whitespace-nowrap px-4 py-1.5 rounded-full text-xs font-bold transition-all bg-slate-100 text-slate-500" onclick="switchTab('tab-dues')">Dues & Sec</button>
             <button class="pill whitespace-nowrap px-4 py-1.5 rounded-full text-xs font-bold transition-all bg-slate-100 text-slate-500" onclick="switchTab('tab-udhaar')">Udhaar</button>
+            <button class="pill whitespace-nowrap px-4 py-1.5 rounded-full text-xs font-bold transition-all bg-slate-100 text-slate-500" onclick="switchTab('tab-payments')">Payments</button>
         </div>
     </header>
 
@@ -343,6 +344,26 @@
         </div>
     </div>
 
+    <!-- TAB 6: PAYMENTS (HISTORY) -->
+    <div id="tab-payments" class="tab-content px-4 pt-6 pb-6">
+        <h2 class="font-bold text-sm text-slate-700 mb-3">Payment History</h2>
+
+        <div class="bg-white rounded-3xl p-5 shadow-sm border border-slate-100 mb-5 text-center">
+            <p class="text-xs font-bold text-slate-400 uppercase mb-2">Total Collected</p>
+            <h3 class="text-4xl font-extrabold text-emerald-600" id="payments-total">₹0</h3>
+            <p class="text-xs text-slate-400 mt-1" id="payments-count">0 payments</p>
+        </div>
+
+        <div class="relative mb-5">
+            <span class="material-symbols-outlined absolute left-3 top-2.5 text-slate-400">search</span>
+            <input type="text" id="payments-search" placeholder="Search customer payment..." class="w-full bg-white border border-slate-200 rounded-xl pl-10 pr-4 py-2.5 text-sm shadow-sm focus:outline-none focus:border-[#0891b2]" oninput="filterPayments()">
+        </div>
+
+        <div class="space-y-5" id="payments-list">
+            <!-- Payments grouped by customer loaded here -->
+        </div>
+    </div>
+
     <!-- Bottom Navigation -->
     <nav class="fixed bottom-0 left-0 w-full z-50 pointer-events-none">
         <div class="max-w-md mx-auto pointer-events-auto bg-white border-t border-slate-200 shadow-[0_-10px_40px_-15px_rgba(0,0,0,0.1)] rounded-t-3xl pb-safe">
@@ -371,6 +392,11 @@
                     <div class="nav-indicator absolute -top-3 w-8 h-1 bg-transparent rounded-b-full"></div>
                     <span class="material-symbols-outlined text-[24px] mb-1">payments</span>
                     <span class="text-[9px] font-bold">Udhaar</span>
+                </button>
+                <button onclick="switchTab('tab-payments')" id="nav-payments" class="nav-btn flex flex-col items-center p-2 text-slate-400 w-16 relative">
+                    <div class="nav-indicator absolute -top-3 w-8 h-1 bg-transparent rounded-b-full"></div>
+                    <span class="material-symbols-outlined text-[24px] mb-1">receipt_long</span>
+                    <span class="text-[9px] font-bold">Payments</span>
                 </button>
             </div>
         </div>
@@ -409,7 +435,7 @@
         document.querySelectorAll('#tab-pills .pill').forEach(el => {
             el.className = 'pill whitespace-nowrap px-4 py-1.5 rounded-full text-xs font-bold transition-all bg-slate-100 text-slate-500';
         });
-        const pillIndex = ['tab-daily', 'tab-billing', 'tab-customers', 'tab-dues', 'tab-udhaar'].indexOf(tabId);
+        const pillIndex = ['tab-daily', 'tab-billing', 'tab-customers', 'tab-dues', 'tab-udhaar', 'tab-payments'].indexOf(tabId);
         if(pillIndex >= 0) {
             const pill = document.querySelectorAll('#tab-pills .pill')[pillIndex];
             pill.className = 'pill active whitespace-nowrap px-4 py-1.5 rounded-full text-xs font-bold transition-all bg-[#0891b2] text-white shadow-md shadow-cyan-200';
@@ -436,6 +462,7 @@
         if(tabId === 'tab-customers') renderCustomers(customersData);
         if(tabId === 'tab-dues') renderDues(customersData);
         if(tabId === 'tab-udhaar') loadUdhaar();
+        if(tabId === 'tab-payments') loadPayments();
     }
 
     // Stepper function
@@ -729,10 +756,16 @@
             const data = await res.json();
             
             if(data.success) {
-                alert(data.message);
                 loadBilling();       // Refresh billing cards
                 loadCustomers();     // Refresh customer data
                 loadDailyStats();    // Refresh dues total
+                if(data.receipt_url) {
+                    if(confirm(`${data.message}\n\nReceipt ${data.receipt_no} ban gaya. Print / PDF ke liye kholna hai?`)) {
+                        window.open(data.receipt_url, '_blank');
+                    }
+                } else {
+                    alert(data.message);
+                }
             } else {
                 alert('Error: ' + data.message);
             }
@@ -1051,6 +1084,84 @@
             await fetch(`/api/udhaar?id=${id}`, { method: 'DELETE' });
             loadUdhaar();
         } catch(e) { alert('Error'); }
+    }
+
+    // --- PAYMENT HISTORY ---
+
+    let paymentsData = [];
+
+    async function loadPayments() {
+        try {
+            const res = await fetch('/api/payments');
+            const data = await res.json();
+            paymentsData = data.payments || [];
+            document.getElementById('payments-total').textContent = money(data.total_collected);
+            document.getElementById('payments-count').textContent = `${data.count || 0} payments`;
+            renderPayments(paymentsData);
+        } catch(e) {
+            document.getElementById('payments-list').innerHTML = '<p class="text-sm text-red-500">Failed to load payment history.</p>';
+        }
+    }
+
+    function renderPayments(list) {
+        const box = document.getElementById('payments-list');
+        if(!list.length) {
+            box.innerHTML = '<div class="bg-white rounded-3xl p-5 shadow-sm border border-slate-100 text-center text-sm text-slate-400">Abhi koi payment record nahi hai.</div>';
+            return;
+        }
+        // Group by customer
+        const groups = {};
+        list.forEach(p => {
+            const key = p.customer_id;
+            if(!groups[key]) groups[key] = { name: p.customer_name, phone: p.customer_phone, items: [] };
+            groups[key].items.push(p);
+        });
+
+        box.innerHTML = Object.values(groups).map(g => {
+            const subtotal = g.items.reduce((s, p) => s + Number(p.amount), 0);
+            const rows = g.items.map(p => {
+                const d = new Date(p.created_at);
+                const dstr = d.toLocaleDateString('en-IN', { day: '2-digit', month: 'short', year: 'numeric' });
+                const isFull = p.payment_type === 'full';
+                const cycle = p.bill_month ? `${String(p.bill_month).padStart(2,'0')}/${p.bill_year}` : '–';
+                return `
+                <div class="flex items-center justify-between gap-2 py-2.5 border-b border-slate-100 last:border-0">
+                    <div class="flex-1 min-w-0">
+                        <p class="text-xs font-bold text-slate-800">${dstr}
+                            <span class="ml-1 px-1.5 py-0.5 rounded-full text-[9px] font-bold ${isFull ? 'bg-emerald-100 text-emerald-700' : 'bg-amber-100 text-amber-700'}">${isFull ? 'FULL' : 'PARTIAL'}</span>
+                        </p>
+                        <p class="text-[10px] text-slate-400 mt-0.5">Receipt ${p.receipt_no} • Bill ${cycle} • Baaki ${money(p.remaining_dues)}</p>
+                    </div>
+                    <div class="text-right">
+                        <p class="text-sm font-extrabold text-emerald-600">${money(p.amount)}</p>
+                        <button onclick="window.open('/api/payment/receipt?id=${p.id}','_blank')" class="text-[10px] text-[#0891b2] font-bold mt-0.5 flex items-center gap-0.5 justify-end">
+                            <span class="material-symbols-outlined text-[12px]">print</span> Receipt
+                        </button>
+                    </div>
+                </div>`;
+            }).join('');
+
+            return `
+            <div class="bg-white rounded-3xl p-4 shadow-sm border border-slate-100">
+                <div class="flex items-center justify-between mb-2 pb-2 border-b border-slate-100">
+                    <div>
+                        <p class="font-bold text-sm text-slate-800">${g.name}</p>
+                        ${g.phone ? `<p class="text-xs text-slate-400">${g.phone}</p>` : ''}
+                    </div>
+                    <div class="text-right">
+                        <p class="text-[10px] text-slate-400 uppercase font-bold">Total Paid</p>
+                        <p class="text-base font-extrabold text-slate-900">${money(subtotal)}</p>
+                    </div>
+                </div>
+                ${rows}
+            </div>`;
+        }).join('');
+    }
+
+    function filterPayments() {
+        const q = document.getElementById('payments-search').value.toLowerCase();
+        const filtered = paymentsData.filter(p => (p.customer_name || '').toLowerCase().includes(q));
+        renderPayments(filtered);
     }
     
     // Add change listener to entry date to reload data

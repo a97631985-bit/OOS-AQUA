@@ -1,4 +1,4 @@
-import { query } from './_lib/db.mjs';
+import { query, withTransaction } from './_lib/db.mjs';
 import { ensureSchema } from './_lib/schema.mjs';
 import { json, error, readJson } from './_lib/http.mjs';
 import { createBackup } from './_lib/backup.mjs';
@@ -49,15 +49,32 @@ export default async (req) => {
       newDues = Math.max(0, totalPayable - paidAmount);
     }
 
-    await query(
-      'UPDATE customers SET previous_dues = $1 WHERE id = $2',
-      [newDues, customerId]
-    );
+    // Update dues AND save a permanent payment record (receipt) atomically.
+    const payment = await withTransaction(async (client) => {
+      await client.query(
+        'UPDATE customers SET previous_dues = $1 WHERE id = $2',
+        [newDues, customerId]
+      );
+      const ins = await client.query(
+        `INSERT INTO payments
+           (customer_id, amount, payment_type, current_bill, previous_dues, total_payable, remaining_dues, bill_month, bill_year)
+         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
+         RETURNING id`,
+        [customerId, paidAmount, paymentType === 'full' ? 'full' : 'partial',
+         currentBill, customer.previous_dues, totalPayable, newDues,
+         Number(month), Number(year)]
+      );
+      return ins.rows[0];
+    });
 
+    const receiptNo = `OA-R-${String(payment.id).padStart(5, '0')}`;
     const done = newDues === 0 ? 'fully cleared.' : `next month previous dues will be Rs.${newDues.toFixed(0)}.`;
 
     return json({
       success: true,
+      payment_id: payment.id,
+      receipt_no: receiptNo,
+      receipt_url: `/api/payment/receipt?id=${payment.id}`,
       current_bill: currentBill,
       previous_dues: customer.previous_dues,
       total_payable: totalPayable,
